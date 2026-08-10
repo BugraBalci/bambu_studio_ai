@@ -18,11 +18,15 @@ class Strength(str, Enum):
     strong = "strong"
 
 
+# P2S Combo official build volume
+P2S_BED_MM = (256.0, 256.0, 256.0)
+
+
 class GeometryMetrics(BaseModel):
     filename: str
     file_id: str
     triangle_count: int
-    bounding_box_mm: list[float] = Field(description="[x, y, z] extents in mm")
+    bounding_box_mm: list[float] = Field(description="Model boyutları [genişlik, derinlik, yükseklik] mm")
     volume_cm3: float
     surface_area_cm2: float
     is_watertight: bool
@@ -31,6 +35,9 @@ class GeometryMetrics(BaseModel):
     thin_feature_note: str = ""
     overhang_risk_hint: bool = False
     overhang_note: str = ""
+    fits_p2s_bed: bool = True
+    bed_fit_note: str = ""
+    printer_bed_mm: list[float] = Field(default_factory=lambda: list(P2S_BED_MM))
 
 
 class FilamentBase(BaseModel):
@@ -66,6 +73,7 @@ class RecommendRequest(BaseModel):
     purpose: Purpose
     strength: Strength
     color_preference: Optional[str] = None
+    preferred_filament_id: Optional[int] = None
     notes: Optional[str] = None
 
 
@@ -84,9 +92,12 @@ class PrintRecommendation(BaseModel):
     brim: bool
     matched_inventory_id: Optional[int] = None
     matched_inventory_slot: Optional[str] = None
+    matched_filament_label: Optional[str] = None
     missing_filament_warning: Optional[str] = None
+    color_conflict_warning: Optional[str] = None
+    ideal_material: Optional[str] = None
+    user_notes_applied: Optional[str] = None
     rationale: str
-    # Phase B hook: values ready to map onto process/filament JSON
     slicer_hints: dict[str, Any] = Field(default_factory=dict)
     schema_version: str = "1.0"
 
@@ -96,3 +107,5 @@ class RecommendResponse(BaseModel):
     recommendation: PrintRecommendation
     used_llm: bool
     rule_baseline: dict[str, Any]
+    source_label: str
+    source_explanation: str

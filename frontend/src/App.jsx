@@ -41,7 +41,7 @@ export default function App() {
   const [geometry, setGeometry] = useState(null)
   const [purpose, setPurpose] = useState('functional')
   const [strength, setStrength] = useState('medium')
-  const [colorPreference, setColorPreference] = useState('')
+  const [preferredFilamentId, setPreferredFilamentId] = useState('')
   const [notes, setNotes] = useState('')
   const [result, setResult] = useState(null)
   const [filaments, setFilaments] = useState([])
@@ -57,16 +57,22 @@ export default function App() {
     refreshFilaments().catch((e) => setError(e.message))
   }, [refreshFilaments])
 
+  const selectedFilament = useMemo(
+    () => filaments.find((f) => String(f.id) === String(preferredFilamentId)) || null,
+    [filaments, preferredFilamentId],
+  )
+
   const recommendPayload = useMemo(() => {
     if (!geometry) return null
     return {
       file_id: geometry.file_id,
       purpose,
       strength,
-      color_preference: colorPreference || null,
+      preferred_filament_id: preferredFilamentId ? Number(preferredFilamentId) : null,
+      color_preference: selectedFilament?.color || null,
       notes: notes || null,
     }
-  }, [geometry, purpose, strength, colorPreference, notes])
+  }, [geometry, purpose, strength, preferredFilamentId, selectedFilament, notes])
 
   async function onFile(file) {
     if (!file) return
@@ -144,6 +150,7 @@ export default function App() {
     setError('')
     try {
       await deleteFilament(id)
+      if (String(preferredFilamentId) === String(id)) setPreferredFilamentId('')
       await refreshFilaments()
     } catch (err) {
       setError(err.message)
@@ -155,11 +162,11 @@ export default function App() {
   return (
     <div className="shell">
       <header className="brand">
-        <div className="brand-mark">Bambu Lab P2S</div>
+        <div className="brand-mark">Bambu Lab P2S Combo</div>
         <h1>Akıllı Baskı Asistanı</h1>
         <p>
-          STL yükle, kullanım amacını ve sağlamlık seviyesini seç — sistem filament ve dilimleme
-          ayarlarını önerir. Faz A: öneri. Faz B için profil JSON indirilebilir.
+          STL yükle → amaç / sağlamlık / eldeki filament seç → sistem P2S Combo için baskı ayarı
+          önerir. Öneri şu an ekranda; Bambu Studio’ya otomatik yazılmaz.
         </p>
       </header>
 
@@ -198,39 +205,55 @@ export default function App() {
             </div>
 
             {geometry ? (
-              <div className="metrics">
-                <div className="metric">
-                  <span>Dosya</span>
-                  <b>{geometry.filename}</b>
+              <>
+                <div className={`banner ${geometry.fits_p2s_bed ? 'ok' : 'warn'}`}>
+                  {geometry.bed_fit_note ||
+                    (geometry.fits_p2s_bed
+                      ? 'Model P2S Combo tablasına sığar.'
+                      : 'Model tabla limitini aşıyor olabilir.')}
                 </div>
-                <div className="metric">
-                  <span>Üçgen</span>
-                  <b>{geometry.triangle_count.toLocaleString('tr-TR')}</b>
+                <div className="metrics">
+                  <div className="metric">
+                    <span>Dosya</span>
+                    <b>{geometry.filename}</b>
+                  </div>
+                  <div className="metric">
+                    <span>Model boyutu (STL)</span>
+                    <b>{formatBox(geometry.bounding_box_mm)}</b>
+                  </div>
+                  <div className="metric">
+                    <span>P2S tabla limiti</span>
+                    <b>{formatBox(geometry.printer_bed_mm || [256, 256, 256])}</b>
+                  </div>
+                  <div className="metric">
+                    <span>Yaklaşık plastik hacmi</span>
+                    <b>{geometry.volume_cm3} cm³</b>
+                  </div>
+                  <div className="metric">
+                    <span>Model detayı</span>
+                    <b>
+                      {geometry.triangle_count.toLocaleString('tr-TR')} üçgen
+                      {geometry.thin_feature_hint ? ' · ince yer var' : ''}
+                    </b>
+                  </div>
+                  <div className="metric">
+                    <span>Kapalı mesh</span>
+                    <b>{geometry.is_watertight ? 'evet' : 'hayır'}</b>
+                  </div>
                 </div>
-                <div className="metric">
-                  <span>Kutu (X×Y×Z)</span>
-                  <b>{formatBox(geometry.bounding_box_mm)}</b>
-                </div>
-                <div className="metric">
-                  <span>Hacim</span>
-                  <b>{geometry.volume_cm3} cm³</b>
-                </div>
-                <div className="metric">
-                  <span>Watertight</span>
-                  <b>{geometry.is_watertight ? 'evet' : 'hayır'}</b>
-                </div>
-                <div className="metric">
-                  <span>İnce özellik</span>
-                  <b>{geometry.thin_feature_hint ? 'var' : 'yok'}</b>
-                </div>
-              </div>
+                <p className="hint">
+                  Boyutlar yazıcı ayarı değil — yüklediğin 3D modelin mm cinsinden büyüklüğü.
+                  P2S Combo tabla: 256×256×256 mm. Hacim yaklaşık ne kadar filament gideceğini;
+                  üçgen sayısı modelin ne kadar detaylı çizildiğini gösterir (ayar değil).
+                </p>
+              </>
             ) : (
               <p className="status">Henüz model yüklenmedi.</p>
             )}
           </div>
 
           <div className="panel stack">
-            <h2>2. Amaç ve sağlamlık</h2>
+            <h2>2. Amaç ve filament</h2>
             <div className="field">
               <label>Kullanım amacı</label>
               <div className="chips">
@@ -262,21 +285,37 @@ export default function App() {
               </div>
             </div>
             <div className="field">
-              <label>Renk tercihi (opsiyonel)</label>
-              <input
-                value={colorPreference}
-                onChange={(e) => setColorPreference(e.target.value)}
-                placeholder="ör. kırmızı, mat siyah"
-              />
+              <label>Hangi filamentle basmak istiyorsun?</label>
+              <select
+                value={preferredFilamentId}
+                onChange={(e) => setPreferredFilamentId(e.target.value)}
+              >
+                <option value="">Otomatik eşleştir (önerilen malzemeye göre)</option>
+                {filaments.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.color} — {f.brand ? `${f.brand} ` : ''}
+                    {f.material}
+                    {f.slot ? ` (${f.slot})` : ''}
+                  </option>
+                ))}
+              </select>
+              <p className="hint">
+                Listede yalnızca envanterindeki renkler var. Önerilen malzemeyle çakışırsa uyarı
+                çıkar.
+              </p>
             </div>
             <div className="field">
-              <label>Not</label>
+              <label>Not (öneriye eklenir)</label>
               <textarea
                 rows={2}
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 placeholder="ör. duvara asılacak raf, yük taşıyacak"
               />
+              <p className="hint">
+                Bu metin öneri gerekçesine yazılır; AI açıksa malzeme/ayar seçiminde de kullanılır
+                (kanca, dış mekan, süs vb.).
+              </p>
             </div>
             <div className="row">
               <button
@@ -287,23 +326,39 @@ export default function App() {
               >
                 {busy ? 'Hesaplanıyor…' : 'Ayarları öner'}
               </button>
-              <span className="status">
-                {result ? (result.used_llm ? 'kaynak: OpenAI + kurallar' : 'kaynak: kural motoru') : ''}
-              </span>
             </div>
           </div>
 
           {rec ? (
             <div className="panel stack">
               <h2>3. Öneri</h2>
+              <div className="banner ok">
+                <strong>Kim öneriyor?</strong> {result.source_label}
+                <div className="hint" style={{ marginTop: '0.35rem' }}>
+                  {result.source_explanation}
+                </div>
+              </div>
+
+              {rec.color_conflict_warning ? (
+                <div className="banner warn">{rec.color_conflict_warning}</div>
+              ) : null}
               {rec.missing_filament_warning ? (
                 <div className="banner warn">{rec.missing_filament_warning}</div>
               ) : (
                 <div className="banner ok">
-                  Envanter eşleşmesi: slot {rec.matched_inventory_slot || '—'} (id{' '}
-                  {rec.matched_inventory_id ?? '—'})
+                  Eşleşen filament:{' '}
+                  {rec.matched_filament_label ||
+                    `${rec.material} / slot ${rec.matched_inventory_slot || '—'}`}
+                  {rec.ideal_material && rec.ideal_material !== rec.material
+                    ? ` · ideal malzeme ${rec.ideal_material} idi`
+                    : ''}
                 </div>
               )}
+
+              {rec.user_notes_applied ? (
+                <div className="banner ok">Notun işlendi: “{rec.user_notes_applied}”</div>
+              ) : null}
+
               <div className="rec-grid">
                 <div className="rec-item">
                   <span>Malzeme</span>
@@ -328,7 +383,7 @@ export default function App() {
                   </b>
                 </div>
                 <div className="rec-item">
-                  <span>Sıcaklık</span>
+                  <span>Sıcaklık (noz / tabla)</span>
                   <b>
                     {rec.nozzle_temp_c}° / {rec.bed_temp_c}°
                   </b>
@@ -341,19 +396,24 @@ export default function App() {
                   <span>Brim</span>
                   <b>{rec.brim ? 'evet' : 'hayır'}</b>
                 </div>
-                <div className="rec-item">
-                  <span>Şema</span>
-                  <b>{rec.schema_version}</b>
-                </div>
               </div>
               <p className="rationale">{rec.rationale}</p>
-              <div className="row">
-                <button type="button" className="btn" onClick={onCopyJson}>
-                  {copied ? 'Kopyalandı' : 'JSON kopyala'}
-                </button>
-                <button type="button" className="btn" onClick={onDownloadProfile}>
-                  Profil JSON indir (Faz B)
-                </button>
+
+              <div className="json-box">
+                <strong>JSON ne işe yarıyor?</strong>
+                <p className="hint">
+                  Ekrandaki ayarların dosya kopyası. Şimdilik Bambu Studio’yu otomatik ayarlamaz;
+                  yedek / paylaşım ve yarınki otomatik dilimleme (Faz B) için. Günlük kullanımda
+                  gerekmez — öneri kartı yeterli.
+                </p>
+                <div className="row">
+                  <button type="button" className="btn" onClick={onCopyJson}>
+                    {copied ? 'Kopyalandı' : 'Ayar JSON kopyala'}
+                  </button>
+                  <button type="button" className="btn" onClick={onDownloadProfile}>
+                    Profil JSON indir
+                  </button>
+                </div>
               </div>
             </div>
           ) : null}
@@ -361,7 +421,7 @@ export default function App() {
 
         <aside className="panel stack">
           <h2>Filament envanteri</h2>
-          <p className="status">AMS slotlarını elle tut; canlı MQTT Faz C’de.</p>
+          <p className="status">AMS / harici slotlarını elle tut; canlı okuma sonra gelecek.</p>
           <form className="form-inline" onSubmit={onAddFilament}>
             <div className="field">
               <label>Malzeme</label>

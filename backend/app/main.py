@@ -22,7 +22,7 @@ from app.schemas import (
 )
 from app.services.geometry import analyze_stl
 from app.services.phase_b import recommendation_to_cli_overlay
-from app.services.recommend import recommend
+from app.services.recommend import recommend, source_meta
 
 settings = get_settings()
 UPLOAD_ROOT = Path(settings.upload_dir)
@@ -60,7 +60,7 @@ def on_startup() -> None:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok", "printer": "Bambu Lab P2S"}
+    return {"status": "ok", "printer": "Bambu Lab P2S Combo"}
 
 
 def _meta_path(file_id: str) -> Path:
@@ -149,12 +149,16 @@ def recommend_settings(payload: RecommendRequest, db: Session = Depends(get_db))
         strength=payload.strength,
         color_preference=payload.color_preference,
         notes=payload.notes,
+        preferred_filament_id=payload.preferred_filament_id,
     )
+    label, explanation = source_meta(used_llm)
     return RecommendResponse(
         geometry=geometry,
         recommendation=recommendation,
         used_llm=used_llm,
         rule_baseline=baseline,
+        source_label=label,
+        source_explanation=explanation,
     )
 
 
@@ -174,9 +178,9 @@ def export_recommendation_schema() -> JSONResponse:
             "bed_temperature": 80,
             "enable_support": False,
             "brim_width": 0,
-            "printer_model": "Bambu Lab P2S",
+            "printer_model": "Bambu Lab P2S Combo",
         },
-        "note": "POST /api/recommend returns PrintRecommendation with slicer_hints for CLI mapping.",
+        "note": "Bu JSON Bambu Studio/Orca CLI ayar köprüsüdür; şimdilik manuel inceleme / Faz B otomasyonu için.",
     }
     return JSONResponse(example)
 
@@ -192,10 +196,16 @@ def export_profile(payload: RecommendRequest, db: Session = Depends(get_db)) -> 
         strength=payload.strength,
         color_preference=payload.color_preference,
         notes=payload.notes,
+        preferred_filament_id=payload.preferred_filament_id,
     )
     profile = {
         "schema_version": recommendation.schema_version,
-        "printer_model": "Bambu Lab P2S",
+        "printer_model": "Bambu Lab P2S Combo",
+        "what_is_this": (
+            "Bu dosya önerilen baskı ayarlarının makine-okur kopyasıdır. "
+            "Şimdilik Bambu Studio'ya otomatik uygulamaz; yarın Faz B'de CLI dilimleme için kullanılır. "
+            "İçindeki slicer_hints: malzeme, nozzle, katman, dolgu, sıcaklık."
+        ),
         "recommendation": recommendation.model_dump(),
         "used_llm": used_llm,
         "cli_ready": recommendation_to_cli_overlay(recommendation),

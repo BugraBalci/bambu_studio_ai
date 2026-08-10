@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-from app.schemas import GeometryMetrics
+from app.schemas import P2S_BED_MM, GeometryMetrics
 
 
 def analyze_stl(path: Path, original_filename: str, file_id: str | None = None) -> GeometryMetrics:
@@ -21,24 +21,21 @@ def analyze_stl(path: Path, original_filename: str, file_id: str | None = None) 
 
     extents = mesh.extents.astype(float)  # mm if STL is in mm
     volume = float(mesh.volume) if mesh.is_volume else float(abs(mesh.volume))
-    # trimesh volume is mm^3 when units are mm
     volume_cm3 = abs(volume) / 1000.0
     surface_cm2 = float(mesh.area) / 100.0
 
     sorted_ext = sorted(extents.tolist())
     aspect = (sorted_ext[-1] / sorted_ext[0]) if sorted_ext[0] > 1e-6 else 1.0
 
-    # Thin feature heuristic: smallest extent < 2mm or high aspect + small min dimension
     min_dim = float(sorted_ext[0])
     thin = min_dim < 2.0 or (aspect > 8 and min_dim < 4.0)
     thin_note = ""
     if thin:
         thin_note = (
-            f"En ince boyut ~{min_dim:.1f} mm; ince duvarlar için daha küçük nozzle "
-            "veya daha fazla wall loop düşünülebilir."
+            f"En ince boyut ~{min_dim:.1f} mm; ince duvarlar için 0.4 mm nozzle "
+            "veya daha fazla duvar önerilir."
         )
 
-    # Overhang heuristic: angled faces pointing down (exclude flat bottom ~ -Z)
     overhang_risk = False
     overhang_note = ""
     if len(mesh.faces) > 0:
@@ -54,6 +51,21 @@ def analyze_stl(path: Path, original_filename: str, file_id: str | None = None) 
                 f"Eğimli alt yüzey oranı ~%{ratio * 100:.0f}; support gerekebilir."
             )
 
+    bed = list(P2S_BED_MM)
+    fits = max(extents) <= max(bed) + 0.05 and all(
+        sorted(extents, reverse=True)[i] <= sorted(bed, reverse=True)[i] + 0.05 for i in range(3)
+    )
+    if fits:
+        bed_fit_note = (
+            f"Model P2S Combo tablasına sığar (tabla {bed[0]:.0f}×{bed[1]:.0f}×{bed[2]:.0f} mm)."
+        )
+    else:
+        bed_fit_note = (
+            f"Dikkat: model {extents[0]:.1f}×{extents[1]:.1f}×{extents[2]:.1f} mm; "
+            f"P2S Combo tabla limiti {bed[0]:.0f}×{bed[1]:.0f}×{bed[2]:.0f} mm — "
+            "bölmen veya küçültmen gerekebilir."
+        )
+
     return GeometryMetrics(
         filename=original_filename,
         file_id=file_id or uuid.uuid4().hex,
@@ -67,4 +79,7 @@ def analyze_stl(path: Path, original_filename: str, file_id: str | None = None) 
         thin_feature_note=thin_note,
         overhang_risk_hint=overhang_risk,
         overhang_note=overhang_note,
+        fits_p2s_bed=fits,
+        bed_fit_note=bed_fit_note,
+        printer_bed_mm=bed,
     )
