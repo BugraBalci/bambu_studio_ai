@@ -1,0 +1,5 @@
+{
+  "_comment": "Export full presets from Bambu Studio for P2S. Phase B merges AI slicer_hints over these files.",
+  "printer_model": "Bambu Lab P2S",
+  "nozzle_diameter": 0.4
+}

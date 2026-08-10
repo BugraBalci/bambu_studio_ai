@@ -1,0 +1,9 @@
+{
+  "_comment": "Placeholder process profile — replace with Studio export.",
+  "layer_height": 0.2,
+  "wall_loops": 3,
+  "sparse_infill_density": 20,
+  "sparse_infill_pattern": "grid",
+  "enable_support": false,
+  "brim_width": 0
+}
