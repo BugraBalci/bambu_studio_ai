@@ -1,0 +1,5 @@
+# Dependencies for auto_slicer.py (also covered by backend/requirements.txt)
+trimesh>=4.5.3
+numpy>=2.2.1
+scipy>=1.14.1
+watchdog>=4.0.0
