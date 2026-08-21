@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  analyzeStl,
+  analyzeMesh,
   createFilament,
   deleteFilament,
+  export3mf,
   exportProfile,
   listFilaments,
   recommend,
 } from './api'
+import ModelPreviewCard from './ModelPreviewCard'
+import { renderMeshThumbnail } from './meshPreview'
 import './App.css'
 
 const PURPOSES = [
@@ -21,12 +24,27 @@ const STRENGTHS = [
   { id: 'strong', label: 'Sağlam' },
 ]
 
+const DETAIL_LABELS = {
+  low: 'Düşük (hızlı basılabilir)',
+  medium: 'Orta',
+  high: 'Yüksek (yavaş / ince)',
+}
+
 const EMPTY_FILAMENT = {
   material: 'PLA',
   color: '',
   brand: '',
   slot: '',
   notes: '',
+}
+
+const MESH_EXTS = ['.glb', '.gltf', '.obj', '.stl']
+
+function isSupportedMesh(file) {
+  const name = file?.name || ''
+  const dot = name.lastIndexOf('.')
+  if (dot < 0) return false
+  return MESH_EXTS.includes(name.slice(dot).toLowerCase())
 }
 
 function formatBox(box) {
@@ -38,6 +56,11 @@ export default function App() {
   const [drag, setDrag] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [selectedFile, setSelectedFile] = useState(null)
+  const [previewStatus, setPreviewStatus] = useState('idle')
+  const [previewUrl, setPreviewUrl] = useState('')
+  const [previewError, setPreviewError] = useState('')
+  const [previewStats, setPreviewStats] = useState(null)
   const [geometry, setGeometry] = useState(null)
   const [purpose, setPurpose] = useState('functional')
   const [strength, setStrength] = useState('medium')
@@ -47,6 +70,7 @@ export default function App() {
   const [filaments, setFilaments] = useState([])
   const [filamentForm, setFilamentForm] = useState(EMPTY_FILAMENT)
   const [copied, setCopied] = useState(false)
+  const fileGen = useRef(0)
 
   const refreshFilaments = useCallback(async () => {
     const rows = await listFilaments()
@@ -76,17 +100,48 @@ export default function App() {
 
   async function onFile(file) {
     if (!file) return
+    if (!isSupportedMesh(file)) {
+      setError('Yalnızca .glb, .gltf, .obj veya .stl desteklenir.')
+      return
+    }
+    const token = ++fileGen.current
     setError('')
     setResult(null)
+    setGeometry(null)
+    setSelectedFile(file)
+    setPreviewUrl('')
+    setPreviewStats(null)
+    setPreviewError('')
+    setPreviewStatus('loading')
     setBusy(true)
+
+    const previewTask = renderMeshThumbnail(file)
+      .then((shot) => {
+        if (token !== fileGen.current) return
+        setPreviewUrl(shot.dataUrl)
+        setPreviewStats({
+          triangleCount: shot.triangleCount,
+          vertexCount: shot.vertexCount,
+        })
+        setPreviewStatus('ready')
+      })
+      .catch((e) => {
+        if (token !== fileGen.current) return
+        setPreviewStatus('error')
+        setPreviewError(e.message || 'Önizleme oluşturulamadı.')
+      })
+
     try {
-      const metrics = await analyzeStl(file)
+      const metrics = await analyzeMesh(file)
+      if (token !== fileGen.current) return
       setGeometry(metrics)
     } catch (e) {
+      if (token !== fileGen.current) return
       setError(e.message)
       setGeometry(null)
     } finally {
-      setBusy(false)
+      if (token === fileGen.current) setBusy(false)
+      await previewTask
     }
   }
 
@@ -131,6 +186,25 @@ export default function App() {
     }
   }
 
+  async function onDownload3mf() {
+    if (!recommendPayload) return
+    setBusy(true)
+    setError('')
+    try {
+      const { blob, filename } = await export3mf(recommendPayload)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function onAddFilament(e) {
     e.preventDefault()
     setError('')
@@ -165,7 +239,7 @@ export default function App() {
         <div className="brand-mark">Bambu Lab P2S Combo</div>
         <h1>Akıllı Baskı Asistanı</h1>
         <p>
-          STL yükle → amaç / sağlamlık / eldeki filament seç → sistem P2S Combo için baskı ayarı
+          GLB / OBJ yükle → amaç / sağlamlık / eldeki filament seç → sistem P2S Combo için baskı ayarı
           önerir. Öneri şu an ekranda; Bambu Studio’ya otomatik yazılmaz.
         </p>
       </header>
@@ -176,33 +250,31 @@ export default function App() {
         <section className="stack">
           <div className="panel stack">
             <h2>1. Model</h2>
-            <div
-              className={`drop ${drag ? 'drag' : ''}`}
+            <ModelPreviewCard
+              status={previewStatus}
+              fileName={selectedFile?.name || geometry?.filename}
+              fileSize={selectedFile?.size}
+              triangleCount={geometry?.triangle_count ?? previewStats?.triangleCount}
+              vertexCount={geometry?.vertex_count ?? previewStats?.vertexCount}
+              previewUrl={previewUrl}
+              errorMessage={previewError}
+              analyzing={busy && !geometry}
+              backendReady={Boolean(geometry)}
+              drag={drag}
               onDragOver={(e) => {
                 e.preventDefault()
                 setDrag(true)
               }}
-              onDragLeave={() => setDrag(false)}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget)) setDrag(false)
+              }}
               onDrop={(e) => {
                 e.preventDefault()
                 setDrag(false)
                 onFile(e.dataTransfer.files?.[0])
               }}
-            >
-              <strong>STL / OBJ sürükle bırak</strong>
-              veya dosya seç
-              <div className="row" style={{ justifyContent: 'center', marginTop: '0.8rem' }}>
-                <label className="btn btn-primary">
-                  Dosya seç
-                  <input
-                    type="file"
-                    accept=".stl,.obj"
-                    hidden
-                    onChange={(e) => onFile(e.target.files?.[0])}
-                  />
-                </label>
-              </div>
-            </div>
+              onPickFile={onFile}
+            />
 
             {geometry ? (
               <>
@@ -218,7 +290,7 @@ export default function App() {
                     <b>{geometry.filename}</b>
                   </div>
                   <div className="metric">
-                    <span>Model boyutu (STL)</span>
+                    <span>Model boyutu</span>
                     <b>{formatBox(geometry.bounding_box_mm)}</b>
                   </div>
                   <div className="metric">
@@ -230,23 +302,39 @@ export default function App() {
                     <b>{geometry.volume_cm3} cm³</b>
                   </div>
                   <div className="metric">
-                    <span>Model detayı</span>
+                    <span>Detay seviyesi</span>
+                    <b>{DETAIL_LABELS[geometry.detail_tier] || geometry.detail_tier || '—'}</b>
+                  </div>
+                  <div className="metric">
+                    <span>Üçgen / köşe</span>
                     <b>
-                      {geometry.triangle_count.toLocaleString('tr-TR')} üçgen
-                      {geometry.thin_feature_hint ? ' · ince yer var' : ''}
+                      {geometry.triangle_count.toLocaleString('tr-TR')}
+                      {geometry.vertex_count
+                        ? ` / ${geometry.vertex_count.toLocaleString('tr-TR')}`
+                        : ''}
                     </b>
                   </div>
                   <div className="metric">
-                    <span>Kapalı mesh</span>
-                    <b>{geometry.is_watertight ? 'evet' : 'hayır'}</b>
+                    <span>Mesh yoğunluğu</span>
+                    <b>
+                      {geometry.triangles_per_cm2 != null
+                        ? `${geometry.triangles_per_cm2} üçgen/cm²`
+                        : `${geometry.triangle_count.toLocaleString('tr-TR')} üçgen`}
+                      {geometry.thin_feature_hint ? ' · ince yer' : ''}
+                    </b>
                   </div>
                 </div>
+                {geometry.detail_note ? <p className="hint">{geometry.detail_note}</p> : null}
                 <p className="hint">
                   Boyutlar yazıcı ayarı değil — yüklediğin 3D modelin mm cinsinden büyüklüğü.
-                  P2S Combo tabla: 256×256×256 mm. Hacim yaklaşık ne kadar filament gideceğini;
-                  üçgen sayısı modelin ne kadar detaylı çizildiğini gösterir (ayar değil).
+                  Detay seviyesi üçgen yoğunluğundan hesaplanır; öneride hız/katman buna göre
+                  ayarlanır.
                 </p>
               </>
+            ) : selectedFile || previewStatus !== 'idle' ? (
+              <p className="status">
+                {busy ? 'Geometri analizi sürüyor…' : 'Analiz bekleniyor veya tamamlanamadı.'}
+              </p>
             ) : (
               <p className="status">Henüz model yüklenmedi.</p>
             )}
@@ -359,6 +447,15 @@ export default function App() {
                 <div className="banner ok">Notun işlendi: “{rec.user_notes_applied}”</div>
               ) : null}
 
+              {rec.speed_rationale ? (
+                <div className="banner ok">
+                  <strong>Hız profili:</strong> {DETAIL_LABELS[rec.detail_tier] || rec.detail_tier}
+                  <div className="hint" style={{ marginTop: '0.35rem' }}>
+                    {rec.speed_rationale}
+                  </div>
+                </div>
+              ) : null}
+
               <div className="rec-grid">
                 <div className="rec-item">
                   <span>Malzeme</span>
@@ -389,6 +486,24 @@ export default function App() {
                   </b>
                 </div>
                 <div className="rec-item">
+                  <span>Genel hız</span>
+                  <b>{rec.print_speed_mm_s != null ? `${rec.print_speed_mm_s} mm/s` : '—'}</b>
+                </div>
+                <div className="rec-item">
+                  <span>Dış duvar hızı</span>
+                  <b>
+                    {rec.outer_wall_speed_mm_s != null ? `${rec.outer_wall_speed_mm_s} mm/s` : '—'}
+                  </b>
+                </div>
+                <div className="rec-item">
+                  <span>Dolgu hızı</span>
+                  <b>
+                    {rec.sparse_infill_speed_mm_s != null
+                      ? `${rec.sparse_infill_speed_mm_s} mm/s`
+                      : '—'}
+                  </b>
+                </div>
+                <div className="rec-item">
                   <span>Support</span>
                   <b>{rec.supports ? 'evet' : 'hayır'}</b>
                 </div>
@@ -400,13 +515,16 @@ export default function App() {
               <p className="rationale">{rec.rationale}</p>
 
               <div className="json-box">
-                <strong>JSON ne işe yarıyor?</strong>
+                <strong>Bambu Studio dosyası (.3mf)</strong>
                 <p className="hint">
-                  Ekrandaki ayarların dosya kopyası. Şimdilik Bambu Studio’yu otomatik ayarlamaz;
-                  yedek / paylaşım ve yarınki otomatik dilimleme (Faz B) için. Günlük kullanımda
-                  gerekmez — öneri kartı yeterli.
+                  İndirdiğin <code>.3mf</code> dosyasını Bambu Studio’da aç → Slice → Print.
+                  Model + önerilen ayarlar (katman, dolgu, hız, sıcaklık…) gömülü. Bu henüz
+                  dilimlenmiş gcode değil; Studio’da bir kez Slice etmen gerekir.
                 </p>
                 <div className="row">
+                  <button type="button" className="btn btn-primary" onClick={onDownload3mf} disabled={busy}>
+                    .3mf indir (Studio)
+                  </button>
                   <button type="button" className="btn" onClick={onCopyJson}>
                     {copied ? 'Kopyalandı' : 'Ayar JSON kopyala'}
                   </button>
