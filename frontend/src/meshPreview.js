@@ -1,3 +1,5 @@
+import { loadThreeMfGroup, logThreeMfMeshes, materialHasNativeColor } from './loadThreeMf'
+
 const PREVIEW_PX = 640
 const MESH_COLOR = 0xf2d4a8
 
@@ -40,27 +42,108 @@ function meshStats(root) {
 function fallbackMaterial(THREE) {
   return new THREE.MeshStandardMaterial({
     color: MESH_COLOR,
-    metalness: 0.12,
-    roughness: 0.46,
+    metalness: 0.08,
+    roughness: 0.48,
     side: THREE.DoubleSide,
   })
 }
 
-function prepareObject(THREE, root) {
-  let shared = null
+function cloneAsStandard(THREE, source, extras = {}) {
+  const color = source?.color ? source.color.clone() : new THREE.Color(MESH_COLOR)
+  return new THREE.MeshStandardMaterial({
+    color,
+    map: source?.map || null,
+    vertexColors: Boolean(extras.vertexColors ?? source?.vertexColors),
+    metalness: 0.1,
+    roughness: 0.4,
+    opacity: source?.opacity ?? 1,
+    transparent: Boolean(source?.transparent) || (source?.opacity != null && source.opacity < 0.999),
+    side: THREE.DoubleSide,
+    flatShading: false,
+    name: source?.name || '',
+  })
+}
+
+function prepareObject(THREE, root, { isThreeMf = false, isGltf = false } = {}) {
+  let sharedFallback = null
   root.traverse((obj) => {
     if (!obj.isMesh || !obj.geometry) return
     if (!obj.geometry.attributes.normal) obj.geometry.computeVertexNormals()
-    if (!obj.material) {
-      if (!shared) shared = fallbackMaterial(THREE)
-      obj.material = shared
+
+    const hasVerts = Boolean(obj.geometry.getAttribute('color'))
+    const mats = Array.isArray(obj.material) ? obj.material : obj.material ? [obj.material] : []
+
+    if (isThreeMf || obj.userData?.fromThreeMf) {
+      const next = mats.length ? mats : [null]
+      obj.material = next.length === 1
+        ? finishThreeMfMaterial(THREE, next[0], obj)
+        : next.map((m) => finishThreeMfMaterial(THREE, m, obj))
       return
     }
-    const mats = Array.isArray(obj.material) ? obj.material : [obj.material]
-    mats.forEach((m) => {
-      if (m) m.side = THREE.DoubleSide
+
+    const native =
+      hasVerts ||
+      mats.some((m) => materialHasNativeColor(m)) ||
+      (isGltf && mats.some((m) => m && (m.color || m.map || m.vertexColors)))
+
+    if (isGltf) {
+      const m = mats[0]
+      const hex = m?.color?.getHex?.()
+      console.log(
+        '[GLB Material]:',
+        obj.name || '(unnamed)',
+        hex != null ? `#${hex.toString(16).padStart(6, '0')}` : '(none)',
+        'map:',
+        Boolean(m?.map),
+        'vertexColors:',
+        Boolean(hasVerts || m?.vertexColors),
+        'native:',
+        native,
+      )
+    }
+
+    if (!native) {
+      if (!sharedFallback) sharedFallback = fallbackMaterial(THREE)
+      obj.material = sharedFallback
+      return
+    }
+
+    const next = mats.map((m) => {
+      if (!m) return fallbackMaterial(THREE)
+      if (m.isMeshStandardMaterial) {
+        m.side = THREE.DoubleSide
+        m.roughness = 0.4
+        m.metalness = 0.1
+        if (hasVerts) {
+          m.vertexColors = true
+          m.color.setHex(0xffffff)
+        }
+        return m
+      }
+      return cloneAsStandard(THREE, m, { vertexColors: hasVerts })
     })
+    obj.material = next.length === 1 ? next[0] : next
   })
+}
+
+function finishThreeMfMaterial(THREE, source, mesh) {
+  const hasVerts = Boolean(mesh.geometry.getAttribute('color'))
+  const material = source?.isMaterial
+    ? source
+    : new THREE.MeshStandardMaterial({ color: source?.color || 0xffffff })
+  material.roughness = 0.4
+  material.metalness = 0.1
+  material.side = THREE.DoubleSide
+  if (hasVerts) {
+    material.vertexColors = true
+    material.color.setHex(0xffffff)
+  }
+  if (material.map) {
+    material.map.flipY = false
+    material.map.needsUpdate = true
+  }
+  material.needsUpdate = true
+  return material
 }
 
 function parseGltf(GLTFLoader, buffer) {
@@ -94,6 +177,10 @@ async function loadObject(THREE, loaders, file) {
     return scene
   }
 
+  if (ext === '.3mf') {
+    return loadThreeMfGroup(THREE, buffer.slice(0))
+  }
+
   throw new Error('Desteklenmeyen 3D format.')
 }
 
@@ -106,7 +193,10 @@ function disposeObject(root) {
       if (!mat || seen.has(mat)) return
       seen.add(mat)
       Object.values(mat).forEach((value) => {
-        if (value && value.isTexture) value.dispose()
+        if (value && value.isTexture) {
+          if (value.userData?.blobUrl) URL.revokeObjectURL(value.userData.blobUrl)
+          value.dispose()
+        }
       })
       mat.dispose()
     })
@@ -129,6 +219,13 @@ function frameCamera(THREE, camera, object) {
   camera.far = dist * 24
   camera.lookAt(0, 0, 0)
   camera.updateProjectionMatrix()
+}
+
+function setupPreviewLights(THREE, scene) {
+  scene.add(new THREE.AmbientLight(0xffffff, 1.2))
+  const key = new THREE.DirectionalLight(0xffffff, 1.5)
+  key.position.set(5, 10, 7)
+  scene.add(key)
 }
 
 /**
@@ -163,7 +260,9 @@ export async function renderMeshThumbnail(file) {
     throw new Error('Dosyada görüntülenecek mesh yok.')
   }
 
-  prepareObject(THREE, object)
+  const ext = extensionOf(file.name)
+  prepareObject(THREE, object, { isThreeMf: ext === '.3mf', isGltf: ext === '.glb' || ext === '.gltf' })
+  if (ext === '.3mf') logThreeMfMeshes(object)
   const stats = meshStats(object)
 
   const canvas = document.createElement('canvas')
@@ -180,23 +279,13 @@ export async function renderMeshThumbnail(file) {
     renderer.setSize(PREVIEW_PX, PREVIEW_PX, false)
     renderer.setClearColor(0x0c1016, 1)
     renderer.outputColorSpace = THREE.SRGBColorSpace
-    renderer.toneMapping = THREE.ACESFilmicToneMapping
-    renderer.toneMappingExposure = 1.12
+    renderer.toneMapping = THREE.NoToneMapping
+    renderer.toneMappingExposure = 1.0
 
     const scene = new THREE.Scene()
     scene.background = new THREE.Color(0x0c1016)
     scene.add(object)
-
-    scene.add(new THREE.HemisphereLight(0xb8c6d8, 0x1a1510, 1.15))
-    const key = new THREE.DirectionalLight(0xfff4e6, 1.35)
-    key.position.set(2.4, 3.2, 1.6)
-    scene.add(key)
-    const fill = new THREE.DirectionalLight(0x8aa4c4, 0.55)
-    fill.position.set(-2.2, 0.4, 1.8)
-    scene.add(fill)
-    const rim = new THREE.DirectionalLight(0xe8953a, 0.55)
-    rim.position.set(-0.6, 1.8, -2.4)
-    scene.add(rim)
+    setupPreviewLights(THREE, scene)
 
     const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 1000)
     frameCamera(THREE, camera, object)
