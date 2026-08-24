@@ -11,12 +11,20 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.models import Filament
 from app.schemas import (
+    ColorSlotMapping,
     GeometryMetrics,
     PrintRecommendation,
     Purpose,
     Strength,
 )
-from app.services.rules import baseline_for, build_slicer_hints, clamp_recommendation
+from app.services.filament_compat import plan_filament_slots, validate_filament_slots
+from app.services.rules import (
+    apply_geometry_overrides,
+    attach_support_and_reasons,
+    baseline_for,
+    build_slicer_hints,
+    clamp_recommendation,
+)
 
 
 RECOMMENDATION_JSON_SCHEMA: dict[str, Any] = {
@@ -220,6 +228,55 @@ def _match_inventory(
     return data
 
 
+def _first_mapped_filament_id(
+    color_filament_map: list[ColorSlotMapping] | list[dict[str, Any]] | None,
+) -> int | None:
+    for item in color_filament_map or []:
+        if isinstance(item, ColorSlotMapping):
+            if item.filament_id is not None:
+                return item.filament_id
+        elif item.get("filament_id") is not None:
+            return int(item["filament_id"])
+    return None
+
+
+def _attach_filament_plan(
+    data: dict[str, Any],
+    geometry: GeometryMetrics,
+    inventory: list[dict[str, Any]],
+    color_filament_map: list[ColorSlotMapping] | list[dict[str, Any]] | None,
+    purpose: Purpose,
+    strength: Strength,
+) -> dict[str, Any]:
+    colors = list(geometry.colors or [])
+    slots = plan_filament_slots(
+        colors,
+        color_filament_map or [],
+        inventory,
+        data.get("material") or "PLA",
+    )
+    warnings = validate_filament_slots(
+        slots,
+        purpose=purpose,
+        strength=strength,
+        ideal_material=data.get("ideal_material") or data.get("material") or "PLA",
+    )
+    data["filament_slots"] = slots
+    data["filament_warnings"] = warnings
+    hints = dict(data.get("slicer_hints") or {})
+    if slots:
+        hints["filament_type"] = [slot.studio_type for slot in slots]
+        hints["nozzle_temperature"] = [slot.nozzle_temp_c for slot in slots]
+        hints["bed_temperature"] = [slot.bed_temp_c for slot in slots]
+        hints["filament_slots"] = [slot.model_dump() for slot in slots]
+        data["slicer_hints"] = hints
+    if warnings:
+        data["rationale"] = (
+            f"{data.get('rationale') or ''} {' '.join(w.message for w in warnings)}"
+        ).strip()
+    return data
+
+
 def _rule_only_recommendation(
     geometry: GeometryMetrics,
     purpose: Purpose,
@@ -228,23 +285,23 @@ def _rule_only_recommendation(
     color_preference: str | None,
     notes: str | None,
     preferred_filament_id: int | None = None,
+    color_filament_map: list[ColorSlotMapping] | None = None,
 ) -> PrintRecommendation:
     base = baseline_for(purpose, strength)
-    if geometry.thin_feature_hint and base["nozzle_mm"] > 0.4:
-        base["nozzle_mm"] = 0.4
-        base["wall_loops"] = max(base["wall_loops"], 3)
-    if geometry.overhang_risk_hint:
-        base["supports"] = True
+    base = apply_geometry_overrides(base, geometry)
 
     data = clamp_recommendation(dict(base))
     data["ideal_material"] = data["material"]
     data = _apply_preferred_filament(data, inventory, preferred_filament_id, color_preference)
+    data = clamp_recommendation(data)
 
     rationale_parts = [
         f"Amaç: {purpose.value}, sağlamlık: {strength.value}.",
         f"Önerilen malzeme {data['material']} "
         f"(%{data['infill_percent']} dolgu, {data['wall_loops']} duvar).",
     ]
+    if data.get("speed_rationale"):
+        rationale_parts.append(data["speed_rationale"])
     if geometry.bed_fit_note:
         rationale_parts.append(geometry.bed_fit_note)
     if geometry.thin_feature_note:
@@ -261,8 +318,12 @@ def _rule_only_recommendation(
     if data.get("missing_filament_warning"):
         rationale_parts.append(data["missing_filament_warning"])
     data["rationale"] = " ".join(rationale_parts)
+    data = attach_support_and_reasons(data, geometry)
     data["slicer_hints"] = build_slicer_hints(data)
     data["schema_version"] = "1.0"
+    data = _attach_filament_plan(
+        data, geometry, inventory, color_filament_map, purpose, strength
+    )
     return PrintRecommendation(**data)
 
 
@@ -274,10 +335,13 @@ def recommend(
     color_preference: str | None = None,
     notes: str | None = None,
     preferred_filament_id: int | None = None,
+    color_filament_map: list[ColorSlotMapping] | None = None,
 ) -> tuple[PrintRecommendation, bool, dict[str, Any]]:
     settings = get_settings()
     inventory = _inventory_payload(db)
     baseline = baseline_for(purpose, strength)
+    if preferred_filament_id is None:
+        preferred_filament_id = _first_mapped_filament_id(color_filament_map)
 
     if not settings.openai_api_key or settings.openai_api_key.startswith("sk-your"):
         rec = _rule_only_recommendation(
@@ -288,6 +352,7 @@ def recommend(
             color_preference,
             notes,
             preferred_filament_id,
+            color_filament_map,
         )
         return rec, False, baseline
 
@@ -336,9 +401,9 @@ def recommend(
         data = clamp_recommendation(data)
         data["ideal_material"] = data.get("material")
         data = _apply_preferred_filament(data, inventory, preferred_filament_id, color_preference)
-
-        if geometry.overhang_risk_hint:
-            data["supports"] = True
+        # Geometry speed/detail rules always win over LLM for P2S-safe bands
+        data = apply_geometry_overrides(data, geometry)
+        data = clamp_recommendation(data)
 
         if notes:
             data["user_notes_applied"] = notes
@@ -349,10 +414,19 @@ def recommend(
         else:
             data["user_notes_applied"] = None
 
+        if data.get("speed_rationale") and data["speed_rationale"] not in (data.get("rationale") or ""):
+            data["rationale"] = (
+                (data.get("rationale") or "") + " " + data["speed_rationale"]
+            ).strip()
+
+        data = attach_support_and_reasons(data, geometry)
         data["slicer_hints"] = build_slicer_hints(data)
         data["schema_version"] = "1.0"
         if not data.get("rationale"):
             data["rationale"] = "AI önerisi kural tabanı ile birleştirildi."
+        data = _attach_filament_plan(
+            data, geometry, inventory, color_filament_map, purpose, strength
+        )
         return PrintRecommendation(**data), True, baseline
     except Exception:
         rec = _rule_only_recommendation(
@@ -363,6 +437,7 @@ def recommend(
             color_preference,
             notes,
             preferred_filament_id,
+            color_filament_map,
         )
         return rec, False, baseline
 
@@ -377,7 +452,7 @@ def source_meta(used_llm: bool) -> tuple[str, str]:
         )
     return (
         "Kural motoru (yerel)",
-        "Öneri bu bilgisayardaki kurallardan geliyor: amaç + sağlamlık → malzeme/nozzle/dolgu/sıcaklık; "
-        "STL ölçüleri ve envanter eşleşmesi de buna eklenir. OpenAI anahtarı yoksa veya API hata verirse "
-        "bu mod kullanılır — rastgele değil, sabit mühendislik kurallarıdır.",
+        "Öneri bu bilgisayardaki kurallardan geliyor: amaç + sağlamlık → malzeme/nozzle/dolgu; "
+        "STL detay skoru → hız/katman; envanter eşleşmesi. OpenAI anahtarı yoksa veya API hata "
+        "verirse bu mod kullanılır — rastgele değil, sabit mühendislik kurallarıdır.",
     )

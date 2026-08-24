@@ -1,4 +1,5 @@
 import { formatBytes, formatCount } from './meshPreview'
+import ModelViewport from './ModelViewport'
 
 function CubeIcon() {
   return (
@@ -26,6 +27,7 @@ function badgeFor({ status, analyzing, backendReady }) {
 
 export default function ModelPreviewCard({
   status = 'idle',
+  file = null,
   fileName,
   fileSize,
   triangleCount,
@@ -39,6 +41,8 @@ export default function ModelPreviewCard({
   onDragLeave,
   onDrop,
   onPickFile,
+  onViewportReady,
+  onViewportError,
 }) {
   const badge = badgeFor({ status, analyzing, backendReady })
   const showMeta = status !== 'idle'
@@ -52,22 +56,37 @@ export default function ModelPreviewCard({
       onDrop={onDrop}
     >
       <div className="preview-stage" aria-busy={isBusy}>
-        {status === 'idle' ? (
+        {status === 'idle' && !file ? (
           <div className="preview-empty">
             <CubeIcon />
             <strong>3D model sürükle bırak</strong>
-            <span>GLB, GLTF, OBJ veya STL</span>
+            <span>GLB, GLTF, OBJ, STL veya 3MF</span>
           </div>
         ) : null}
 
-        {status === 'loading' ? (
+        {file && status !== 'error' ? (
+          <>
+            <ModelViewport file={file} onReady={onViewportReady} onError={onViewportError} />
+            {status === 'loading' ? (
+              <div className="preview-skeleton preview-overlay">
+                <div className="spinner" />
+                <span>Mesh okunuyor…</span>
+              </div>
+            ) : null}
+            {status === 'ready' ? (
+              <span className="preview-orbit-hint">Sürükle: döndür · Sağ tık: kaydır · Tekerlek: yakınlaş</span>
+            ) : null}
+          </>
+        ) : null}
+
+        {!file && status === 'loading' ? (
           <div className="preview-skeleton">
             <div className="spinner" />
             <span>Mesh okunuyor…</span>
           </div>
         ) : null}
 
-        {status === 'ready' && previewUrl ? (
+        {!file && status === 'ready' && previewUrl ? (
           <img className="preview-shot" src={previewUrl} alt={`${fileName || 'Model'} önizlemesi`} />
         ) : null}
 
@@ -76,13 +95,6 @@ export default function ModelPreviewCard({
             <CubeIcon />
             <strong>Önizleme oluşturulamadı</strong>
             <span>{errorMessage || 'Dosya okunamadı veya bozuk.'}</span>
-          </div>
-        ) : null}
-
-        {status === 'ready' && !previewUrl ? (
-          <div className="preview-skeleton">
-            <div className="spinner" />
-            <span>Görüntü hazırlanıyor…</span>
           </div>
         ) : null}
 
@@ -119,7 +131,7 @@ export default function ModelPreviewCard({
             {showMeta ? 'Başka dosya seç' : 'Dosya seç'}
             <input
               type="file"
-              accept=".glb,.gltf,.obj,.stl"
+              accept=".glb,.gltf,.obj,.stl,.3mf"
               hidden
               onChange={(e) => {
                 onPickFile?.(e.target.files?.[0])

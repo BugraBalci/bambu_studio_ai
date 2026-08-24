@@ -1,32 +1,44 @@
 from __future__ import annotations
 
+import logging
 import shutil
+import sys
 import uuid
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 
 from app.config import ROOT_DIR, get_settings
+
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from app.database import get_db, init_db
 from app.models import Filament
 from app.schemas import (
     FilamentCreate,
     FilamentOut,
     FilamentUpdate,
+    FilamentMapValidateRequest,
+    FilamentMapValidateResponse,
     GeometryMetrics,
     RecommendRequest,
     RecommendResponse,
 )
-from app.services.geometry import analyze_stl
+from app.services.bambu_3mf import write_bambu_3mf_bytes
+from app.services.filament_compat import plan_filament_slots, validate_filament_slots
+from app.services.geometry import SUPPORTED_MESH_SUFFIXES, analyze_mesh, extract_detected_colors
 from app.services.phase_b import recommendation_to_cli_overlay
 from app.services.recommend import recommend, source_meta
+from app.services.rules import baseline_for
 
 settings = get_settings()
 UPLOAD_ROOT = Path(settings.upload_dir)
 META_SUFFIX = ".meta.json"
+LOGGER = logging.getLogger(__name__)
 
 app = FastAPI(title="Bambu P2S Smart Print Assistant", version="0.1.0")
 app.add_middleware(
@@ -70,15 +82,70 @@ def _meta_path(file_id: str) -> Path:
 def _load_geometry(file_id: str) -> GeometryMetrics:
     meta = _meta_path(file_id)
     if not meta.exists():
-        raise HTTPException(status_code=404, detail="Analiz bulunamadı. Önce STL yükleyin.")
+        raise HTTPException(status_code=404, detail="Analiz bulunamadı. Önce bir model yükleyin.")
     return GeometryMetrics.model_validate_json(meta.read_text(encoding="utf-8"))
+
+
+def _ensure_colors(geometry: GeometryMetrics) -> GeometryMetrics:
+    if geometry.colors:
+        return geometry
+    try:
+        path = _model_path_for(geometry.file_id)
+        colors = extract_detected_colors(path)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Color palette recovery failed for %s: %s", geometry.file_id, exc)
+        return geometry
+    geometry.colors = colors
+    geometry.color_count = max(geometry.color_count, len(colors) or 1)
+    _meta_path(geometry.file_id).write_text(geometry.model_dump_json(indent=2), encoding="utf-8")
+    return geometry
+
+
+def _filament_inventory(db: Session) -> list[dict]:
+    rows = db.query(Filament).order_by(Filament.id).all()
+    return [
+        {
+            "id": row.id,
+            "material": row.material,
+            "color": row.color,
+            "brand": row.brand,
+            "slot": row.slot,
+        }
+        for row in rows
+    ]
+
+
+def _run_recommend(payload: RecommendRequest, db: Session):
+    geometry = _ensure_colors(_load_geometry(payload.file_id))
+    recommendation, used_llm, baseline = recommend(
+        db=db,
+        geometry=geometry,
+        purpose=payload.purpose,
+        strength=payload.strength,
+        color_preference=payload.color_preference,
+        notes=payload.notes,
+        preferred_filament_id=payload.preferred_filament_id,
+        color_filament_map=payload.color_filament_map,
+    )
+    return geometry, recommendation, used_llm, baseline
 
 
 @app.post("/api/analyze", response_model=GeometryMetrics)
 async def analyze(file: UploadFile = File(...)) -> GeometryMetrics:
-    name = file.filename or "model.stl"
-    if not name.lower().endswith((".stl", ".obj")):
-        raise HTTPException(status_code=400, detail="Yalnızca .stl veya .obj desteklenir.")
+    name = file.filename or "model.glb"
+    suffix = Path(name).suffix.lower()
+    if suffix not in SUPPORTED_MESH_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail="Yalnızca .3mf, .glb, .gltf, .obj veya .stl desteklenir.",
+        )
+
+    if suffix == ".3mf":
+        LOGGER.info(
+            "3MF received (%s). Geometry analysis runs server-side; the UI preview "
+            "parses the original archive in the browser and is not overwritten by this mesh.",
+            name,
+        )
 
     file_id = uuid.uuid4().hex
     dest = UPLOAD_ROOT / f"{file_id}_{Path(name).name}"
@@ -86,15 +153,30 @@ async def analyze(file: UploadFile = File(...)) -> GeometryMetrics:
         shutil.copyfileobj(file.file, out)
 
     try:
-        metrics = analyze_stl(dest, original_filename=name, file_id=file_id)
+        metrics = analyze_mesh(dest, original_filename=name, file_id=file_id)
     except Exception as exc:  # noqa: BLE001
         dest.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail=f"STL analiz edilemedi: {exc}") from exc
+        raise HTTPException(status_code=400, detail=f"Model analiz edilemedi: {exc}") from exc
 
     _meta_path(file_id).write_text(metrics.model_dump_json(indent=2), encoding="utf-8")
     # Keep path reference for Phase B
     (UPLOAD_ROOT / f"{file_id}.path").write_text(str(dest), encoding="utf-8")
+    _write_geometry_profile(dest)
     return metrics
+
+
+def _write_geometry_profile(model_path: Path) -> None:
+    """Run the trimesh/scipy analyzer and write a Bambu Studio JSON next to the mesh."""
+    try:
+        from auto_slicer import process_model
+
+        if model_path.suffix.lower() == ".3mf":
+            out = model_path.with_name(f"{model_path.stem}_ready_to_print.3mf")
+        else:
+            out = model_path.with_name(f"{model_path.stem}_optimized_p2s_profile.json")
+        process_model(model_path, out)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Geometry profile export skipped for %s: %s", model_path.name, exc)
 
 
 @app.get("/api/analyze/{file_id}", response_model=GeometryMetrics)
@@ -139,18 +221,34 @@ def delete_filament(filament_id: int, db: Session = Depends(get_db)) -> Response
     db.commit()
     return Response(status_code=204)
 
-@app.post("/api/recommend", response_model=RecommendResponse)
-def recommend_settings(payload: RecommendRequest, db: Session = Depends(get_db)) -> RecommendResponse:
-    geometry = _load_geometry(payload.file_id)
-    recommendation, used_llm, baseline = recommend(
-        db=db,
-        geometry=geometry,
+@app.post("/api/filament-map/validate", response_model=FilamentMapValidateResponse)
+def validate_filament_map(
+    payload: FilamentMapValidateRequest, db: Session = Depends(get_db)
+) -> FilamentMapValidateResponse:
+    geometry = _ensure_colors(_load_geometry(payload.file_id))
+    fallback = baseline_for(payload.purpose, payload.strength)["material"]
+    slots = plan_filament_slots(
+        geometry.colors,
+        payload.color_filament_map,
+        _filament_inventory(db),
+        fallback,
+    )
+    warnings = validate_filament_slots(
+        slots,
         purpose=payload.purpose,
         strength=payload.strength,
-        color_preference=payload.color_preference,
-        notes=payload.notes,
-        preferred_filament_id=payload.preferred_filament_id,
+        ideal_material=fallback,
     )
+    return FilamentMapValidateResponse(
+        colors=geometry.colors,
+        slots=slots,
+        warnings=warnings,
+    )
+
+
+@app.post("/api/recommend", response_model=RecommendResponse)
+def recommend_settings(payload: RecommendRequest, db: Session = Depends(get_db)) -> RecommendResponse:
+    geometry, recommendation, used_llm, baseline = _run_recommend(payload, db)
     label, explanation = source_meta(used_llm)
     return RecommendResponse(
         geometry=geometry,
@@ -180,7 +278,7 @@ def export_recommendation_schema() -> JSONResponse:
             "brim_width": 0,
             "printer_model": "Bambu Lab P2S Combo",
         },
-        "note": "Bu JSON Bambu Studio/Orca CLI ayar köprüsüdür; şimdilik manuel inceleme / Faz B otomasyonu için.",
+        "note": "Bu JSON Bambu Studio/Orca CLI ayar köprüsüdür; geometri analizinden üretilir.",
     }
     return JSONResponse(example)
 
@@ -188,16 +286,7 @@ def export_recommendation_schema() -> JSONResponse:
 @app.post("/api/recommend/export-profile")
 def export_profile(payload: RecommendRequest, db: Session = Depends(get_db)) -> JSONResponse:
     """Download-ready profile JSON for Phase B (machine/process/filament overlay)."""
-    geometry = _load_geometry(payload.file_id)
-    recommendation, used_llm, _ = recommend(
-        db=db,
-        geometry=geometry,
-        purpose=payload.purpose,
-        strength=payload.strength,
-        color_preference=payload.color_preference,
-        notes=payload.notes,
-        preferred_filament_id=payload.preferred_filament_id,
-    )
+    geometry, recommendation, used_llm, _ = _run_recommend(payload, db)
     profile = {
         "schema_version": recommendation.schema_version,
         "printer_model": "Bambu Lab P2S Combo",
@@ -213,4 +302,36 @@ def export_profile(payload: RecommendRequest, db: Session = Depends(get_db)) -> 
     return JSONResponse(
         content=profile,
         headers={"Content-Disposition": 'attachment; filename="p2s_profile.json"'},
+    )
+
+
+def _model_path_for(file_id: str) -> Path:
+    marker = UPLOAD_ROOT / f"{file_id}.path"
+    if not marker.exists():
+        raise HTTPException(status_code=404, detail="Yüklenen model dosyası bulunamadı.")
+    path = Path(marker.read_text(encoding="utf-8").strip())
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Model dosyası diskte yok.")
+    return path
+
+
+@app.post("/api/recommend/export-3mf")
+def export_3mf(payload: RecommendRequest, db: Session = Depends(get_db)) -> Response:
+    """Bambu Studio proje .3mf — aç, Slice, bas. (Önceden dilimlenmiş gcode değil.)"""
+    geometry, recommendation, _, _ = _run_recommend(payload, db)
+    model_path = _model_path_for(payload.file_id)
+    try:
+        data = write_bambu_3mf_bytes(
+            model_path,
+            recommendation,
+            part_name=Path(geometry.filename).stem or "model",
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"3MF oluşturulamadı: {exc}") from exc
+
+    fname = f"p2s_{payload.file_id[:8]}_{recommendation.material}.3mf"
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )

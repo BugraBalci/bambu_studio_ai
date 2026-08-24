@@ -21,6 +21,52 @@ function extensionOf(name = '') {
   return dot < 0 ? '' : name.slice(dot).toLowerCase()
 }
 
+function isZUpSource(filename = '', object, THREE) {
+  const ext = extensionOf(filename)
+  if (ext === '.3mf' || ext === '.stl') return true
+  if (ext === '.glb' || ext === '.gltf') {
+    const box = new THREE.Box3().setFromObject(object)
+    const size = box.getSize(new THREE.Vector3())
+    // CAD/slicer GLBs often store height on Z; glTF-native assets are already Y-up.
+    return size.z > size.y * 1.12
+  }
+  if (ext === '.obj') {
+    const box = new THREE.Box3().setFromObject(object)
+    const size = box.getSize(new THREE.Vector3())
+    return size.z >= size.y
+  }
+  return false
+}
+
+/**
+ * 3MF/STL (and many CAD GLBs) are Z-up; Three.js is Y-up.
+ * Rotate -90° about X, then center on XZ and sit the mesh on Y = 0.
+ */
+export function alignModelOrientation(THREE, root, filename = '') {
+  root.updateMatrixWorld(true)
+  if (isZUpSource(filename, root, THREE)) {
+    root.rotation.x = -Math.PI / 2
+    root.updateMatrixWorld(true)
+  }
+
+  root.traverse((obj) => {
+    if (!obj.isMesh || !obj.geometry) return
+    if (obj.geometry.center && !obj.userData?.skipCenter) {
+      // Keep assembly parts in their authored offsets; only isolated STL meshes center locally.
+      if (extensionOf(filename) === '.stl') obj.geometry.center()
+    }
+  })
+  root.updateMatrixWorld(true)
+
+  const box = new THREE.Box3().setFromObject(root)
+  if (box.isEmpty()) return
+  const center = box.getCenter(new THREE.Vector3())
+  root.position.x -= center.x
+  root.position.z -= center.z
+  root.position.y -= box.min.y
+  root.updateMatrixWorld(true)
+}
+
 function meshStats(root) {
   let triangleCount = 0
   let vertexCount = 0
@@ -207,18 +253,39 @@ function frameCamera(THREE, camera, object) {
   const box = new THREE.Box3().setFromObject(object)
   const size = box.getSize(new THREE.Vector3())
   const center = box.getCenter(new THREE.Vector3())
-  object.position.sub(center)
-  object.updateMatrixWorld(true)
 
   const maxDim = Math.max(size.x, size.y, size.z, 1e-6)
   const fov = (camera.fov * Math.PI) / 180
   const dist = (maxDim / (2 * Math.tan(fov / 2))) * 1.65
   const dir = new THREE.Vector3(1.08, 0.86, 1.28).normalize()
-  camera.position.copy(dir.multiplyScalar(dist))
+  camera.position.copy(center).add(dir.multiplyScalar(dist))
   camera.near = Math.max(dist / 120, 0.01)
   camera.far = dist * 24
-  camera.lookAt(0, 0, 0)
+  camera.lookAt(center)
   camera.updateProjectionMatrix()
+}
+
+export function frameOrbitCamera(THREE, camera, controls, object) {
+  const box = new THREE.Box3().setFromObject(object)
+  const size = box.getSize(new THREE.Vector3())
+  const center = box.getCenter(new THREE.Vector3())
+  const maxDim = Math.max(size.x, size.y, size.z, 1e-6)
+  const fov = (camera.fov * Math.PI) / 180
+  const dist = (maxDim / (2 * Math.tan(fov / 2))) * 1.85
+  const dir = new THREE.Vector3(1.15, 0.72, 1.35).normalize()
+  camera.position.copy(center).add(dir.clone().multiplyScalar(dist))
+  camera.near = Math.max(dist / 140, 0.01)
+  camera.far = dist * 30
+  camera.updateProjectionMatrix()
+  if (controls) {
+    controls.target.copy(center)
+    controls.minDistance = Math.max(maxDim * 0.35, 0.05)
+    controls.maxDistance = maxDim * 14
+    controls.update()
+  } else {
+    camera.lookAt(center)
+  }
+  return { size, center, maxDim }
 }
 
 function setupPreviewLights(THREE, scene) {
@@ -262,6 +329,7 @@ export async function renderMeshThumbnail(file) {
 
   const ext = extensionOf(file.name)
   prepareObject(THREE, object, { isThreeMf: ext === '.3mf', isGltf: ext === '.glb' || ext === '.gltf' })
+  alignModelOrientation(THREE, object, file.name)
   if (ext === '.3mf') logThreeMfMeshes(object)
   const stats = meshStats(object)
 
@@ -301,4 +369,30 @@ export async function renderMeshThumbnail(file) {
     renderer.dispose()
     renderer.forceContextLoss?.()
   }
+}
+
+/**
+ * Load a print mesh, apply materials + Z-up alignment. Caller owns disposal.
+ */
+export async function loadAlignedPreviewObject(file) {
+  const THREE = await import('three')
+  const [{ GLTFLoader }, { OBJLoader }, { STLLoader }] = await Promise.all([
+    import('three/addons/loaders/GLTFLoader.js'),
+    import('three/addons/loaders/OBJLoader.js'),
+    import('three/addons/loaders/STLLoader.js'),
+  ])
+  const object = await loadObject(THREE, { GLTFLoader, OBJLoader, STLLoader }, file)
+  object.updateMatrixWorld(true)
+  let found = false
+  object.traverse((obj) => {
+    if (obj.isMesh) found = true
+  })
+  if (!found) {
+    disposeObject(object)
+    throw new Error('Dosyada görüntülenecek mesh yok.')
+  }
+  const ext = extensionOf(file.name)
+  prepareObject(THREE, object, { isThreeMf: ext === '.3mf', isGltf: ext === '.glb' || ext === '.gltf' })
+  alignModelOrientation(THREE, object, file.name)
+  return { THREE, object, stats: meshStats(object), dispose: () => disposeObject(object) }
 }

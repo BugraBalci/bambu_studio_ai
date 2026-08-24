@@ -5,11 +5,14 @@ import {
   deleteFilament,
   export3mf,
   exportProfile,
+  filamentOptionLabel,
   listFilaments,
   recommend,
+  validateFilamentMap,
 } from './api'
+import ColorSlotMap from './ColorSlotMap'
 import ModelPreviewCard from './ModelPreviewCard'
-import { renderMeshThumbnail } from './meshPreview'
+import WarningModal from './WarningModal'
 import './App.css'
 
 const PURPOSES = [
@@ -38,7 +41,7 @@ const EMPTY_FILAMENT = {
   notes: '',
 }
 
-const MESH_EXTS = ['.glb', '.gltf', '.obj', '.stl']
+const MESH_EXTS = ['.glb', '.gltf', '.obj', '.stl', '.3mf']
 
 function isSupportedMesh(file) {
   const name = file?.name || ''
@@ -50,6 +53,40 @@ function isSupportedMesh(file) {
 function formatBox(box) {
   if (!box?.length) return '—'
   return box.map((n) => `${n}`).join(' × ') + ' mm'
+}
+
+const SUPPORT_TYPE_LABELS = {
+  'tree(auto)': 'Tree (otomatik)',
+  'normal(auto)': 'Grid / normal',
+  none: 'Kapalı',
+}
+
+function RecItem({ label, value, reason }) {
+  return (
+    <div className="rec-item">
+      <span>{label}</span>
+      <b>{value}</b>
+      {reason ? <p className="rec-why">{reason}</p> : null}
+    </div>
+  )
+}
+
+function autoMapColors(colors, filaments) {
+  const used = new Set()
+  const map = {}
+  for (const color of colors || []) {
+    const names = [color.name, ...(color.aliases || [])].map((s) => String(s).toLowerCase())
+    const match = filaments.find((f) => {
+      if (used.has(f.id)) return false
+      const fc = String(f.color || '').toLowerCase()
+      return fc && names.some((n) => fc === n || fc.includes(n) || n.includes(fc))
+    })
+    if (match) {
+      map[color.id] = String(match.id)
+      used.add(match.id)
+    }
+  }
+  return map
 }
 
 export default function App() {
@@ -70,6 +107,10 @@ export default function App() {
   const [filaments, setFilaments] = useState([])
   const [filamentForm, setFilamentForm] = useState(EMPTY_FILAMENT)
   const [copied, setCopied] = useState(false)
+  const [colorMap, setColorMap] = useState({})
+  const [mapWarnings, setMapWarnings] = useState([])
+  const [pendingChange, setPendingChange] = useState(null)
+  const [warningsAcked, setWarningsAcked] = useState(false)
   const fileGen = useRef(0)
 
   const refreshFilaments = useCallback(async () => {
@@ -86,6 +127,17 @@ export default function App() {
     [filaments, preferredFilamentId],
   )
 
+  const colorFilamentMap = useMemo(() => {
+    if (!geometry?.colors?.length) return []
+    return geometry.colors.map((c) => ({
+      color_id: c.id,
+      filament_id: colorMap[c.id] ? Number(colorMap[c.id]) : null,
+    }))
+  }, [geometry, colorMap])
+
+  const isMultiColor =
+    (geometry?.colors?.length || 0) >= 2 || (geometry?.color_count || 0) >= 2
+
   const recommendPayload = useMemo(() => {
     if (!geometry) return null
     return {
@@ -95,41 +147,40 @@ export default function App() {
       preferred_filament_id: preferredFilamentId ? Number(preferredFilamentId) : null,
       color_preference: selectedFilament?.color || null,
       notes: notes || null,
+      color_filament_map: colorFilamentMap,
+      acknowledge_filament_warnings: warningsAcked,
     }
-  }, [geometry, purpose, strength, preferredFilamentId, selectedFilament, notes])
+  }, [
+    geometry,
+    purpose,
+    strength,
+    preferredFilamentId,
+    selectedFilament,
+    notes,
+    colorFilamentMap,
+    warningsAcked,
+  ])
 
   async function onFile(file) {
     if (!file) return
     if (!isSupportedMesh(file)) {
-      setError('Yalnızca .glb, .gltf, .obj veya .stl desteklenir.')
+      setError('Yalnızca .3mf, .glb, .gltf, .obj veya .stl desteklenir.')
       return
     }
     const token = ++fileGen.current
     setError('')
     setResult(null)
     setGeometry(null)
+    setColorMap({})
+    setMapWarnings([])
+    setPendingChange(null)
+    setWarningsAcked(false)
     setSelectedFile(file)
     setPreviewUrl('')
     setPreviewStats(null)
     setPreviewError('')
     setPreviewStatus('loading')
     setBusy(true)
-
-    const previewTask = renderMeshThumbnail(file)
-      .then((shot) => {
-        if (token !== fileGen.current) return
-        setPreviewUrl(shot.dataUrl)
-        setPreviewStats({
-          triangleCount: shot.triangleCount,
-          vertexCount: shot.vertexCount,
-        })
-        setPreviewStatus('ready')
-      })
-      .catch((e) => {
-        if (token !== fileGen.current) return
-        setPreviewStatus('error')
-        setPreviewError(e.message || 'Önizleme oluşturulamadı.')
-      })
 
     try {
       const metrics = await analyzeMesh(file)
@@ -141,22 +192,107 @@ export default function App() {
       setGeometry(null)
     } finally {
       if (token === fileGen.current) setBusy(false)
-      await previewTask
     }
+  }
+
+  const onViewportReady = useCallback((stats) => {
+    setPreviewStats(stats)
+    setPreviewStatus('ready')
+    setPreviewError('')
+  }, [])
+
+  const onViewportError = useCallback((message) => {
+    setPreviewStatus('error')
+    setPreviewError(message || 'Önizleme oluşturulamadı.')
+  }, [])
+
+  useEffect(() => {
+    if (!geometry?.colors?.length || !filaments.length) return
+    setColorMap((prev) => (Object.keys(prev).length ? prev : autoMapColors(geometry.colors, filaments)))
+  }, [geometry?.file_id, filaments])
+
+  function mapValidateBody(nextMap = colorMap) {
+    return {
+      file_id: geometry.file_id,
+      purpose,
+      strength,
+      color_filament_map: (geometry.colors || []).map((c) => ({
+        color_id: c.id,
+        filament_id: nextMap[c.id] ? Number(nextMap[c.id]) : null,
+      })),
+    }
+  }
+
+  async function onColorMapChange(colorId, filamentId) {
+    const next = { ...colorMap, [colorId]: filamentId }
+    setWarningsAcked(false)
+    if (!geometry) {
+      setColorMap(next)
+      return
+    }
+    try {
+      const res = await validateFilamentMap(mapValidateBody(next))
+      const warnings = res.warnings || []
+      if (warnings.length) {
+        setPendingChange({ nextMap: next, warnings, resume: null })
+        return
+      }
+      setColorMap(next)
+      setMapWarnings([])
+    } catch (e) {
+      setColorMap(next)
+      setError(e.message)
+    }
+  }
+
+  async function confirmThen(action) {
+    if (!geometry || !isMultiColor) {
+      await action()
+      return
+    }
+    try {
+      const res = await validateFilamentMap(mapValidateBody())
+      const warnings = res.warnings || []
+      setMapWarnings(warnings)
+      if (warnings.length && !warningsAcked) {
+        setPendingChange({ nextMap: colorMap, warnings, resume: action })
+        return
+      }
+      await action()
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  function onChangeSelection() {
+    setPendingChange(null)
+  }
+
+  async function onProceedAnyway() {
+    const pending = pendingChange
+    setPendingChange(null)
+    if (!pending) return
+    setColorMap(pending.nextMap)
+    setMapWarnings(pending.warnings || [])
+    setWarningsAcked(true)
+    if (pending.resume) await pending.resume()
   }
 
   async function onRecommend() {
     if (!recommendPayload) return
-    setError('')
-    setBusy(true)
-    try {
-      const data = await recommend(recommendPayload)
-      setResult(data)
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setBusy(false)
-    }
+    await confirmThen(async () => {
+      setError('')
+      setBusy(true)
+      try {
+        const data = await recommend(recommendPayload)
+        setResult(data)
+        setMapWarnings(data.recommendation?.filament_warnings || [])
+      } catch (e) {
+        setError(e.message)
+      } finally {
+        setBusy(false)
+      }
+    })
   }
 
   async function onCopyJson() {
@@ -168,41 +304,45 @@ export default function App() {
 
   async function onDownloadProfile() {
     if (!recommendPayload) return
-    setBusy(true)
-    setError('')
-    try {
-      const profile = await exportProfile(recommendPayload)
-      const blob = new Blob([JSON.stringify(profile, null, 2)], { type: 'application/json' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `p2s_${geometry.file_id.slice(0, 8)}_profile.json`
-      a.click()
-      URL.revokeObjectURL(url)
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setBusy(false)
-    }
+    await confirmThen(async () => {
+      setBusy(true)
+      setError('')
+      try {
+        const profile = await exportProfile(recommendPayload)
+        const blob = new Blob([JSON.stringify(profile, null, 2)], { type: 'application/json' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `p2s_${geometry.file_id.slice(0, 8)}_profile.json`
+        a.click()
+        URL.revokeObjectURL(url)
+      } catch (e) {
+        setError(e.message)
+      } finally {
+        setBusy(false)
+      }
+    })
   }
 
   async function onDownload3mf() {
     if (!recommendPayload) return
-    setBusy(true)
-    setError('')
-    try {
-      const { blob, filename } = await export3mf(recommendPayload)
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = filename
-      a.click()
-      URL.revokeObjectURL(url)
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setBusy(false)
-    }
+    await confirmThen(async () => {
+      setBusy(true)
+      setError('')
+      try {
+        const { blob, filename } = await export3mf(recommendPayload)
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = filename
+        a.click()
+        URL.revokeObjectURL(url)
+      } catch (e) {
+        setError(e.message)
+      } finally {
+        setBusy(false)
+      }
+    })
   }
 
   async function onAddFilament(e) {
@@ -239,8 +379,8 @@ export default function App() {
         <div className="brand-mark">Bambu Lab P2S Combo</div>
         <h1>Akıllı Baskı Asistanı</h1>
         <p>
-          GLB / OBJ yükle → amaç / sağlamlık / eldeki filament seç → sistem P2S Combo için baskı ayarı
-          önerir. Öneri şu an ekranda; Bambu Studio’ya otomatik yazılmaz.
+          GLB / OBJ / 3MF yükle → amaç / sağlamlık / eldeki filament seç → sistem P2S Combo için baskı ayarı
+          önerir. Meshy `.3mf` renk ve gövde ayrımı korunur.
         </p>
       </header>
 
@@ -252,6 +392,7 @@ export default function App() {
             <h2>1. Model</h2>
             <ModelPreviewCard
               status={previewStatus}
+              file={selectedFile}
               fileName={selectedFile?.name || geometry?.filename}
               fileSize={selectedFile?.size}
               triangleCount={geometry?.triangle_count ?? previewStats?.triangleCount}
@@ -274,6 +415,8 @@ export default function App() {
                 onFile(e.dataTransfer.files?.[0])
               }}
               onPickFile={onFile}
+              onViewportReady={onViewportReady}
+              onViewportError={onViewportError}
             />
 
             {geometry ? (
@@ -306,6 +449,16 @@ export default function App() {
                     <b>{DETAIL_LABELS[geometry.detail_tier] || geometry.detail_tier || '—'}</b>
                   </div>
                   <div className="metric">
+                    <span>Renk paleti</span>
+                    <b className="palette">
+                      {(geometry.colors || []).length
+                        ? geometry.colors.map((c) => (
+                            <span key={c.id} className="swatch sm" style={{ background: c.hex }} title={`${c.name} ${c.hex}`} />
+                          ))
+                        : geometry.color_count || 1}
+                    </b>
+                  </div>
+                  <div className="metric">
                     <span>Üçgen / köşe</span>
                     <b>
                       {geometry.triangle_count.toLocaleString('tr-TR')}
@@ -323,7 +476,24 @@ export default function App() {
                       {geometry.thin_feature_hint ? ' · ince yer' : ''}
                     </b>
                   </div>
+                  <div className="metric">
+                    <span>Support</span>
+                    <b>
+                      {geometry.support_required
+                        ? SUPPORT_TYPE_LABELS[geometry.recommended_support_type] ||
+                          geometry.recommended_support_type
+                        : 'Gerekmez'}
+                      {geometry.overhang_area_ratio > 0.01
+                        ? ` · %${(geometry.overhang_area_ratio * 100).toFixed(0)} overhang`
+                        : ''}
+                    </b>
+                  </div>
                 </div>
+                {geometry.support_reason ? (
+                  <div className={`banner ${geometry.support_required ? 'warn' : 'ok'}`}>
+                    {geometry.support_reason}
+                  </div>
+                ) : null}
                 {geometry.detail_note ? <p className="hint">{geometry.detail_note}</p> : null}
                 <p className="hint">
                   Boyutlar yazıcı ayarı değil — yüklediğin 3D modelin mm cinsinden büyüklüğü.
@@ -372,26 +542,34 @@ export default function App() {
                 ))}
               </div>
             </div>
-            <div className="field">
-              <label>Hangi filamentle basmak istiyorsun?</label>
-              <select
-                value={preferredFilamentId}
-                onChange={(e) => setPreferredFilamentId(e.target.value)}
-              >
-                <option value="">Otomatik eşleştir (önerilen malzemeye göre)</option>
-                {filaments.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.color} — {f.brand ? `${f.brand} ` : ''}
-                    {f.material}
-                    {f.slot ? ` (${f.slot})` : ''}
-                  </option>
-                ))}
-              </select>
-              <p className="hint">
-                Listede yalnızca envanterindeki renkler var. Önerilen malzemeyle çakışırsa uyarı
-                çıkar.
-              </p>
-            </div>
+            {isMultiColor && geometry?.colors?.length ? (
+              <ColorSlotMap
+                colors={geometry.colors}
+                filaments={filaments}
+                value={colorMap}
+                onChange={onColorMapChange}
+                warnings={mapWarnings}
+              />
+            ) : (
+              <div className="field">
+                <label>Hangi filamentle basmak istiyorsun?</label>
+                <select
+                  value={preferredFilamentId}
+                  onChange={(e) => setPreferredFilamentId(e.target.value)}
+                >
+                  <option value="">Otomatik eşleştir (önerilen malzemeye göre)</option>
+                  {filaments.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {filamentOptionLabel(f)}
+                    </option>
+                  ))}
+                </select>
+                <p className="hint">
+                  Listede yalnızca envanterindeki renkler var. Önerilen malzemeyle çakışırsa uyarı
+                  çıkar.
+                </p>
+              </div>
+            )}
             <div className="field">
               <label>Not (öneriye eklenir)</label>
               <textarea
@@ -430,6 +608,13 @@ export default function App() {
               {rec.color_conflict_warning ? (
                 <div className="banner warn">{rec.color_conflict_warning}</div>
               ) : null}
+              {(rec.filament_warnings || mapWarnings).length
+                ? (rec.filament_warnings || mapWarnings).map((w) => (
+                    <div key={`${w.code}-${w.color_id || w.message}`} className={`banner ${w.severity === 'high' ? 'err' : 'warn'}`}>
+                      {w.message}
+                    </div>
+                  ))
+                : null}
               {rec.missing_filament_warning ? (
                 <div className="banner warn">{rec.missing_filament_warning}</div>
               ) : (
@@ -457,60 +642,63 @@ export default function App() {
               ) : null}
 
               <div className="rec-grid">
-                <div className="rec-item">
-                  <span>Malzeme</span>
-                  <b>{rec.material}</b>
-                </div>
-                <div className="rec-item">
-                  <span>Nozzle</span>
-                  <b>{rec.nozzle_mm} mm</b>
-                </div>
-                <div className="rec-item">
-                  <span>Katman</span>
-                  <b>{rec.layer_height_mm} mm</b>
-                </div>
-                <div className="rec-item">
-                  <span>Duvar</span>
-                  <b>{rec.wall_loops}</b>
-                </div>
-                <div className="rec-item">
-                  <span>Dolgu</span>
-                  <b>
-                    %{rec.infill_percent} {rec.infill_pattern}
-                  </b>
-                </div>
-                <div className="rec-item">
-                  <span>Sıcaklık (noz / tabla)</span>
-                  <b>
-                    {rec.nozzle_temp_c}° / {rec.bed_temp_c}°
-                  </b>
-                </div>
-                <div className="rec-item">
-                  <span>Genel hız</span>
-                  <b>{rec.print_speed_mm_s != null ? `${rec.print_speed_mm_s} mm/s` : '—'}</b>
-                </div>
-                <div className="rec-item">
-                  <span>Dış duvar hızı</span>
-                  <b>
-                    {rec.outer_wall_speed_mm_s != null ? `${rec.outer_wall_speed_mm_s} mm/s` : '—'}
-                  </b>
-                </div>
-                <div className="rec-item">
-                  <span>Dolgu hızı</span>
-                  <b>
-                    {rec.sparse_infill_speed_mm_s != null
+                <RecItem label="Malzeme" value={rec.material} reason={rec.setting_reasons?.material} />
+                <RecItem
+                  label="Nozzle"
+                  value={`${rec.nozzle_mm} mm`}
+                  reason={rec.setting_reasons?.nozzle}
+                />
+                <RecItem
+                  label="Katman"
+                  value={`${rec.layer_height_mm} mm`}
+                  reason={rec.setting_reasons?.layer_height}
+                />
+                <RecItem label="Duvar" value={rec.wall_loops} reason={rec.setting_reasons?.walls} />
+                <RecItem
+                  label="Dolgu"
+                  value={`%${rec.infill_percent} ${rec.infill_pattern}`}
+                  reason={rec.setting_reasons?.infill}
+                />
+                <RecItem
+                  label="Sıcaklık (noz / tabla)"
+                  value={`${rec.nozzle_temp_c}° / ${rec.bed_temp_c}°`}
+                  reason={rec.setting_reasons?.temperature}
+                />
+                <RecItem
+                  label="Genel hız"
+                  value={rec.print_speed_mm_s != null ? `${rec.print_speed_mm_s} mm/s` : '—'}
+                  reason={rec.setting_reasons?.print_speed}
+                />
+                <RecItem
+                  label="Dış duvar hızı"
+                  value={
+                    rec.outer_wall_speed_mm_s != null ? `${rec.outer_wall_speed_mm_s} mm/s` : '—'
+                  }
+                  reason={rec.setting_reasons?.outer_wall_speed}
+                />
+                <RecItem
+                  label="Dolgu hızı"
+                  value={
+                    rec.sparse_infill_speed_mm_s != null
                       ? `${rec.sparse_infill_speed_mm_s} mm/s`
-                      : '—'}
-                  </b>
-                </div>
-                <div className="rec-item">
-                  <span>Support</span>
-                  <b>{rec.supports ? 'evet' : 'hayır'}</b>
-                </div>
-                <div className="rec-item">
-                  <span>Brim</span>
-                  <b>{rec.brim ? 'evet' : 'hayır'}</b>
-                </div>
+                      : '—'
+                  }
+                  reason={rec.setting_reasons?.infill_speed}
+                />
+                <RecItem
+                  label="Support"
+                  value={
+                    rec.supports
+                      ? SUPPORT_TYPE_LABELS[rec.support_type] || rec.support_type || 'Açık'
+                      : 'Kapalı'
+                  }
+                  reason={rec.setting_reasons?.supports || rec.support_reason}
+                />
+                <RecItem
+                  label="Brim"
+                  value={rec.brim ? 'evet' : 'hayır'}
+                  reason={rec.setting_reasons?.brim}
+                />
               </div>
               <p className="rationale">{rec.rationale}</p>
 
@@ -537,10 +725,14 @@ export default function App() {
           ) : null}
         </section>
 
-        <aside className="panel stack">
-          <h2>Filament envanteri</h2>
-          <p className="status">AMS / harici slotlarını elle tut; canlı okuma sonra gelecek.</p>
-          <form className="form-inline" onSubmit={onAddFilament}>
+        <aside className="panel stack inv-panel">
+          <div className="inv-head">
+            <div>
+              <h2>Filament envanteri</h2>
+              <p className="status">AMS / harici slot · {filaments.length} kayıt</p>
+            </div>
+          </div>
+          <form className="inv-toolbar" onSubmit={onAddFilament}>
             <div className="field">
               <label>Malzeme</label>
               <select
@@ -578,47 +770,42 @@ export default function App() {
                 placeholder="AMS-1"
               />
             </div>
-            <div className="field wide">
-              <button type="submit" className="btn btn-primary">
-                Ekle
-              </button>
-            </div>
+            <button type="submit" className="btn btn-primary btn-add" title="Filament ekle">
+              +
+            </button>
           </form>
 
           {filaments.length ? (
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Malzeme</th>
-                  <th>Renk</th>
-                  <th>Slot</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {filaments.map((f) => (
-                  <tr key={f.id}>
-                    <td>{f.material}</td>
-                    <td>{f.color}</td>
-                    <td>{f.slot || '—'}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        onClick={() => onDeleteFilament(f.id)}
-                      >
-                        sil
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="inv-cards">
+              {filaments.map((f) => (
+                <div key={f.id} className="inv-card">
+                  <div className="inv-card-top">
+                    <b>{f.material}</b>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => onDeleteFilament(f.id)}
+                      aria-label="Filament sil"
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <span className="inv-color">{f.color}</span>
+                  <span className="inv-slot">{f.slot || 'slot yok'}</span>
+                </div>
+              ))}
+            </div>
           ) : (
             <p className="status">Envanter boş — öneri yine çalışır, uyarı verir.</p>
           )}
         </aside>
       </div>
+      <WarningModal
+        open={Boolean(pendingChange)}
+        warnings={pendingChange?.warnings}
+        onChangeSelection={onChangeSelection}
+        onProceed={onProceedAnyway}
+      />
     </div>
   )
 }

@@ -62,6 +62,21 @@ export async function export3mf(payload) {
   return { blob, filename: match?.[1] || 'p2s_project.3mf' }
 }
 
+export function filamentOptionLabel(f) {
+  const slot = (f.slot || '').trim() || 'Envanter'
+  const brand = (f.brand || '').trim()
+  const core = [slot, brand, f.material].filter(Boolean).join(' ')
+  return f.color ? `${core} — ${f.color}` : core
+}
+
+export function validateFilamentMap(payload) {
+  return request('/filament-map/validate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
 export function listFilaments() {
   return request('/filaments')
 }
