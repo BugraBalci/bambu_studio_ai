@@ -66,7 +66,7 @@ export function filamentOptionLabel(f) {
   const slot = (f.slot || '').trim() || 'Envanter'
   const brand = (f.brand || '').trim()
   const core = [slot, brand, f.material].filter(Boolean).join(' ')
-  return f.color ? `${core} — ${f.color}` : core
+  return f.color ? `${core} - ${f.color}` : core
 }
 
 export function validateFilamentMap(payload) {
