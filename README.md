@@ -52,6 +52,34 @@ Or separately:
 ./run.sh ui     # http://127.0.0.1:5173
 ```
 
+## Windows One-Click Launch
+
+Use these helpers on Windows 10/11 so you do not have to open PowerShell and type commands.
+
+**First-time setup** (same as [Kurulum](#kurulum), in `cmd` or PowerShell):
+
+```bat
+cd backend
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+
+cd ..\frontend
+npm install
+```
+
+**Optional desktop shortcut** (run once from the repo root):
+
+```bat
+powershell -ExecutionPolicy Bypass -File .\setup_desktop_shortcut.ps1
+```
+
+That creates **Bambu AI Studio** on your Desktop, pointing at `start_app.bat` with the working directory set to this repo.
+
+**Start both servers** — double-click `start_app.bat` (or the Desktop shortcut). It checks for `backend\.venv` and `frontend\node_modules`, opens titled consoles for the API (`http://127.0.0.1:8000`) and UI (`http://127.0.0.1:5173`), then launches the default browser.
+
+**Stop** — close those two consoles, or double-click `stop_app.bat` to free ports 8000 and 5173.
+
 ## API
 
 | Endpoint | Açıklama |
