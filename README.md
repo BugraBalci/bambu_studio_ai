@@ -63,33 +63,27 @@ Ayrı ayrı:
 ./run.sh ui     # http://127.0.0.1:5173
 ```
 
-## Windows One-Click Launch
+## Windows masaüstü kısayolu
 
-Use these helpers on Windows 10/11 so you do not have to open PowerShell and type commands.
+Windows 10/11’de uygulama masaüstünden çift tıklayarak çalışır. Terminal açmana gerek yok.
 
-**First-time setup** (same as [Kurulum](#kurulum), in `cmd` or PowerShell):
+**Bir kez:** Python 3.10+ ([python.org](https://www.python.org/downloads/), “Add python.exe to PATH”) ve Node.js 20+ LTS ([nodejs.org](https://nodejs.org/)) kurulu olsun. Sonra repo klasöründe `setup_windows.bat` dosyasına çift tıkla. Bu script:
 
-```bat
-cd backend
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+1. `backend\.venv` oluşturur ve pip paketlerini kurar
+2. `frontend` içinde `npm install` çalıştırır
+3. Masaüstüne **Bambu AI Studio** ve **Bambu AI Studio - Durdur** kısayollarını koyar
 
-cd ..\frontend
-npm install
-```
+**Her gün:** masaüstündeki **Bambu AI Studio** ikonuna çift tıkla. İki konsol açılır (API `8000`, arayüz `5173`) ve tarayıcı `http://127.0.0.1:5173` adresine gider.
 
-**Optional desktop shortcut** (run once from the repo root):
+Durdurmak için **Bambu AI Studio - Durdur** kısayoluna çift tıkla, ya da o iki konsolu kapat.
+
+Kısayolu sonradan tekrar yazmak için repo kökünde:
 
 ```bat
 powershell -ExecutionPolicy Bypass -File .\setup_desktop_shortcut.ps1
 ```
 
-That creates **Bambu AI Studio** on your Desktop, pointing at `start_app.bat` with the working directory set to this repo.
-
-**Start both servers** — double-click `start_app.bat` (or the Desktop shortcut). It checks for `backend\.venv` and `frontend\node_modules`, opens titled consoles for the API (`http://127.0.0.1:8000`) and UI (`http://127.0.0.1:5173`), then launches the default browser.
-
-**Stop** — close those two consoles, or double-click `stop_app.bat` to free ports 8000 and 5173.
+Kısayol `start_app.bat` dosyasını **bu repo klasöründen** çalıştırır. Projeyi başka yere taşırsan `setup_windows.bat` veya `setup_desktop_shortcut.ps1` dosyasını yeni konumda bir kez daha çalıştır.
 
 ## API
 

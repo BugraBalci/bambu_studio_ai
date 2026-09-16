@@ -32,41 +32,35 @@ echo.
 
 REM --- Prerequisites ----------------------------------------------------------
 
-if not exist "%VENV_DIR%\" (
-    echo [ERROR] backend\.venv was not found.
+if not exist "%VENV_PY%" (
+    echo [INFO] Ilk calistirma: Python venv / paketler eksik.
+    echo setup_windows.bat --deps-only calistiriliyor...
     echo.
-    echo Create and populate the virtual environment first:
-    echo   cd backend
-    echo   python -m venv .venv
-    echo   .venv\Scripts\activate
-    echo   pip install -r requirements.txt
-    echo.
-    pause
-    exit /b 1
+    call "%~dp0setup_windows.bat" --deps-only
+    if errorlevel 1 (
+        echo [ERROR] Otomatik kurulum basarisiz. setup_windows.bat dosyasina cift tikla.
+        pause
+        exit /b 1
+    )
 )
 
 if not exist "%VENV_PY%" (
     echo [ERROR] backend\.venv exists but Scripts\python.exe is missing.
     echo This usually means the venv was created on Linux/macOS, not Windows.
-    echo Recreate it on this machine:
-    echo   cd backend
-    echo   python -m venv .venv
-    echo   .venv\Scripts\activate
-    echo   pip install -r requirements.txt
+    echo Recreate it on this machine: double-click setup_windows.bat
     echo.
     pause
     exit /b 1
 )
 
 if not exist "%NODE_MODULES%\" (
-    echo [ERROR] frontend\node_modules was not found.
-    echo.
-    echo Install frontend dependencies first:
-    echo   cd frontend
-    echo   npm install
-    echo.
-    pause
-    exit /b 1
+    echo [INFO] frontend\node_modules eksik, kuruluyor...
+    call "%~dp0setup_windows.bat" --deps-only
+    if errorlevel 1 (
+        echo [ERROR] npm install basarisiz. setup_windows.bat dosyasina cift tikla.
+        pause
+        exit /b 1
+    )
 )
 
 where npm >nul 2>&1
