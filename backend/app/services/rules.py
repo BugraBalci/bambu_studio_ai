@@ -417,7 +417,10 @@ def build_slicer_hints(data: dict[str, Any]) -> dict[str, Any]:
         or ("tree(auto)" if data["supports"] else "normal(auto)"),
         "brim_width": 5 if data["brim"] else 0,
         "outer_wall_speed": data.get("outer_wall_speed_mm_s"),
+        "internal_solid_infill_speed": data.get("print_speed_mm_s"),
         "sparse_infill_speed": data.get("sparse_infill_speed_mm_s"),
         "print_speed": data.get("print_speed_mm_s"),
-        "printer_model": "Bambu Lab P2S Combo",
+        "brim_type": "outer_only" if data.get("brim") else "no_brim",
+        "printer_model": "Bambu Lab P2S",
+        "printer_settings_id": "Bambu Lab P2S 0.4 nozzle",
     }
