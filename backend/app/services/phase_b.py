@@ -43,7 +43,7 @@ def recommendation_to_cli_overlay(rec: PrintRecommendation) -> dict[str, Any]:
         filament_overlay["filament_slots"] = [slot.model_dump() for slot in rec.filament_slots]
     machine_overlay = {
         "nozzle_diameter": hints.get("nozzle_diameter", rec.nozzle_mm),
-        "printer_model": hints.get("printer_model", "Bambu Lab P2S Combo"),
+        "printer_model": hints.get("printer_model", "Bambu Lab P2S"),
     }
     return {
         "schema_version": rec.schema_version,
