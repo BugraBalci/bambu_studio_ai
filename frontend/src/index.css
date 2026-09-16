@@ -10,7 +10,9 @@
   --ok: #3dba86;
   --warn: #e0a106;
   --danger: #e05a4a;
-  --font-display: "IBM Plex Sans", "Segoe UI", sans-serif;
+  /* Bundled IBM Plex is the source of truth on Windows and Linux.
+     System fonts are last-resort only so Segoe UI vs Ubuntu cannot diverge. */
+  --font-display: "IBM Plex Sans", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 }
 
@@ -27,6 +29,9 @@ body,
 
 body {
   font-family: var(--font-display);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
   color: var(--text);
   background:
     radial-gradient(1200px 600px at 10% -10%, #2a2218 0%, transparent 55%),

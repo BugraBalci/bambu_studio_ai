@@ -18,7 +18,7 @@ async function request(path, options = {}) {
   return data
 }
 
-export function analyzeStl(file) {
+export function analyzeMesh(file) {
   const body = new FormData()
   body.append('file', file)
   return request('/analyze', { method: 'POST', body })
@@ -34,6 +34,43 @@ export function recommend(payload) {
 
 export function exportProfile(payload) {
   return request('/recommend/export-profile', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function export3mf(payload) {
+  const res = await fetch(`${API}/recommend/export-3mf`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    let message = `HTTP ${res.status}`
+    try {
+      const data = await res.json()
+      message = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail || data)
+    } catch {
+      /* ignore */
+    }
+    throw new Error(message)
+  }
+  const blob = await res.blob()
+  const cd = res.headers.get('Content-Disposition') || ''
+  const match = cd.match(/filename="([^"]+)"/)
+  return { blob, filename: match?.[1] || 'p2s_project.3mf' }
+}
+
+export function filamentOptionLabel(f) {
+  const slot = (f.slot || '').trim() || 'Envanter'
+  const brand = (f.brand || '').trim()
+  const core = [slot, brand, f.material].filter(Boolean).join(' ')
+  return f.color ? `${core} - ${f.color}` : core
+}
+
+export function validateFilamentMap(payload) {
+  return request('/filament-map/validate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
