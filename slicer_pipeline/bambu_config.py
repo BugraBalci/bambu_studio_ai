@@ -12,11 +12,14 @@ from slicer_pipeline.constants import (
     PRINTER_MODEL,
     PRINTER_NAME,
     PRINTER_SETTINGS_ID,
-    PRINTER_VARIANT,
     TEMPLATE_PATH,
 )
 from slicer_pipeline.geometry import GeometryMetrics
 from slicer_pipeline.rules import RuleResult
+from slicer_pipeline.studio_profile import (
+    PRINTER_VARIANT_DIAMETER,
+    stamp_p2s_project_headers,
+)
 
 LOGGER = logging.getLogger("auto_slicer")
 
@@ -28,10 +31,9 @@ KEY_ALIASES = {
 
 P2S_IDENTITY = {
     "printer_model": PRINTER_MODEL,
-    "printer_variant": "0.4",
+    "printer_variant": PRINTER_VARIANT_DIAMETER,
     "printer_settings_id": PRINTER_SETTINGS_ID,
     "printer_notes": f"Generated for {PRINTER_NAME} by auto_slicer.py",
-    "from": "auto_slicer",
 }
 
 
@@ -49,7 +51,7 @@ class BambuConfigEngine:
         """Conservative P2S Combo starting profile (single filament)."""
         return {
             "printer_model": PRINTER_MODEL,
-            "printer_variant": PRINTER_VARIANT,
+            "printer_variant": PRINTER_VARIANT_DIAMETER,
             "nozzle_diameter": ["0.4"],
             "layer_height": "0.20",
             "initial_layer_print_height": "0.20",
@@ -155,8 +157,7 @@ class BambuConfigEngine:
             else:
                 settings[dest_key] = value
         settings.update(P2S_IDENTITY)
-        settings["printer_variant"] = "0.4"
-        settings["printer_settings_id"] = PRINTER_SETTINGS_ID
+        stamp_p2s_project_headers(settings)
         if "_auto_slicer_meta" in self.profile:
             settings["_auto_slicer_meta"] = self.profile["_auto_slicer_meta"]
         return settings
@@ -182,6 +183,8 @@ class BambuConfigEngine:
             "printable_area",
             "thumbnail_size",
             "upward_compatible_machine",
+            "print_compatible_printers",
+            "different_settings_to_system",
             "nozzle_diameter",
         }
         for key, value in list(settings.items()):
@@ -212,7 +215,7 @@ class BambuConfigEngine:
                 settings["filament_type"] = (list(settings["filament_type"]) + [fill] * n)[:n]
         if slot_profiles:
             settings = self._apply_slot_profiles(settings, slot_profiles, n)
-        return settings
+        return stamp_p2s_project_headers(settings)
 
     @staticmethod
     def _apply_slot_profiles(
@@ -242,6 +245,7 @@ class BambuConfigEngine:
         settings["nozzle_temperature"] = column("nozzle_temp_c", "220")
         settings["nozzle_temperature_initial_layer"] = column("nozzle_temp_c", "220")
         bed = column("bed_temp_c", "60")
+        settings["bed_temperature"] = bed
         for key in (
             "cool_plate_temp",
             "cool_plate_temp_initial_layer",

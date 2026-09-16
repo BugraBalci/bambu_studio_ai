@@ -15,6 +15,7 @@ import numpy as np
 
 from slicer_pipeline.constants import P2S_BED_MM, PRINTER_NAME
 from slicer_pipeline.mesh_parser import MeshAssembly, MeshPart, _transform_to_attrib
+from slicer_pipeline.studio_profile import object_metadata_from_settings
 
 LOGGER = logging.getLogger("auto_slicer")
 
@@ -106,8 +107,9 @@ class ProjectPackager:
         working = self._prepare_assembly(assembly)
         colors = working.materials or ["#FFFFFFFF"]
         model_name = part_name or Path(working.filename).stem or "model"
+        object_settings = object_metadata_from_settings(settings)
         model_xml, model_settings, object_ids = self._build_model_documents(
-            working, colors, model_name
+            working, colors, model_name, object_settings=object_settings
         )
         content_types, rels, slice_info = self._static_xml()
 
@@ -188,20 +190,33 @@ class ProjectPackager:
         working.assign_extruders()
         return working
 
+    @staticmethod
+    def _process_metadata_xml(object_settings: dict[str, str], indent: str = "    ") -> str:
+        if not object_settings:
+            return ""
+        lines = [
+            f'{indent}<metadata key="{_a(key)}" value="{_a(value)}"/>'
+            for key, value in object_settings.items()
+        ]
+        return "\n".join(lines)
+
     def _build_model_documents(
         self,
         assembly: MeshAssembly,
         colors: list[str],
         model_name: str,
+        object_settings: Optional[dict[str, str]] = None,
     ) -> tuple[str, str, dict[str, int]]:
         material_id = 1
         leaf_ids: list[int] = []
         object_blocks: list[str] = []
         part_settings: list[str] = []
         id_map: dict[str, int] = {}
+        process_xml = self._process_metadata_xml(object_settings or {})
+        process_block = f"\n{process_xml}" if process_xml else ""
 
         next_id = 2
-        for part in assembly.parts:
+        for part_index, part in enumerate(assembly.parts, start=1):
             oid = next_id
             next_id += 1
             leaf_ids.append(oid)
@@ -215,10 +230,16 @@ class ProjectPackager:
                 "    </object>"
             )
             part_settings.append(
-                f'    <part id="{oid}">\n'
+                f'    <part id="{part_index}" subtype="normal_part">\n'
                 f'      <metadata key="name" value="{_a(part.name)}"/>\n'
                 f'      <metadata key="matrix" value="{_IDENTITY_16}"/>\n'
                 f'      <metadata key="extruder" value="{part.extruder}"/>\n'
+                f'      <metadata key="source_file" value="{_a(model_name)}"/>\n'
+                f'      <metadata key="source_object_id" value="{part_index - 1}"/>\n'
+                '      <metadata key="source_volume_id" value="0"/>\n'
+                '      <metadata key="source_offset_x" value="0"/>\n'
+                '      <metadata key="source_offset_y" value="0"/>\n'
+                '      <metadata key="source_offset_z" value="0"/>\n'
                 "    </part>"
             )
 
@@ -247,7 +268,8 @@ class ProjectPackager:
             object_config = (
                 f'  <object id="{assembly_id}">\n'
                 f'    <metadata key="name" value="{_a(model_name)}"/>\n'
-                '    <metadata key="extruder" value="1"/>\n'
+                '    <metadata key="extruder" value="1"/>'
+                f"{process_block}\n"
                 + "\n".join(part_settings)
                 + "\n  </object>"
             )
@@ -263,8 +285,10 @@ class ProjectPackager:
             object_config = (
                 f'  <object id="{build_id}">\n'
                 f'    <metadata key="name" value="{_a(only.name or model_name)}"/>\n'
-                f'    <metadata key="extruder" value="{only.extruder}"/>\n'
-                "  </object>"
+                f'    <metadata key="extruder" value="{only.extruder}"/>'
+                f"{process_block}\n"
+                + "\n".join(part_settings)
+                + "\n  </object>"
             )
 
         build_uuid = str(uuid.uuid4())
@@ -288,6 +312,7 @@ class ProjectPackager:
 </model>
 """
 
+        filament_map = " ".join(str(i) for i in range(1, max(len(colors), 1) + 1))
         model_settings = f"""<?xml version="1.0" encoding="UTF-8"?>
 <config>
 {object_config}
@@ -295,8 +320,13 @@ class ProjectPackager:
     <metadata key="plater_id" value="1"/>
     <metadata key="plater_name" value="Plate 1"/>
     <metadata key="locked" value="false"/>
+    <metadata key="filament_map_mode" value="Auto For Flush"/>
+    <metadata key="filament_map" value="{filament_map}"/>
 {instances_xml}
   </plate>
+  <assemble>
+    <assemble_item object_id="{build_id}" instance_id="0" transform="{_IDENTITY_16}" offset="0 0 0"/>
+  </assemble>
 </config>
 """
         id_map["_build"] = build_id
@@ -308,7 +338,8 @@ class ProjectPackager:
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
-  <Default Extension="config" ContentType="application/vnd.bambu.metadata+json"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Default Extension="gcode" ContentType="text/x.gcode"/>
   <Default Extension="json" ContentType="application/json"/>
   <Default Extension="xml" ContentType="application/xml"/>
 </Types>
