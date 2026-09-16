@@ -50,6 +50,13 @@ PRINTER_MODEL = "Bambu Lab P2S"
 PRINTER_NAME = "Bambu Lab P2S Combo"
 PRINTER_VARIANT = "0.4 nozzle"
 PRINTER_SETTINGS_ID = "Bambu Lab P2S 0.4 nozzle"
+# `model_id` of resources/profiles/BBL/machine/Bambu Lab P2S.json — Studio reads it
+# back from Metadata/slice_info.config as the plate's printer_model_id.
+PRINTER_MODEL_ID = "N7"
+STUDIO_BED_TYPE = "Textured PEI Plate"
+# Studio stamps its own version into project archives and expects the same
+# 4-part form in the slice_info header (X-BBL-Client-Version).
+STUDIO_VERSION = "02.06.00.51"
 AMS_SLOT_CAP = 16
 
 _3MF_UNIT_TO_MM = {
