@@ -13,13 +13,36 @@ from xml.sax.saxutils import escape
 
 import numpy as np
 
-from slicer_pipeline.constants import P2S_BED_MM, PRINTER_NAME
+from slicer_pipeline.constants import (
+    P2S_BED_MM,
+    PRINTER_MODEL_ID,
+    PRINTER_NAME,
+    STUDIO_BED_TYPE,
+    STUDIO_VERSION,
+)
 from slicer_pipeline.mesh_parser import MeshAssembly, MeshPart, _transform_to_attrib
-from slicer_pipeline.studio_profile import object_metadata_from_settings
+from slicer_pipeline.studio_profile import first_scalar, object_metadata_from_settings
 
 LOGGER = logging.getLogger("auto_slicer")
 
 _IDENTITY_16 = "1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"
+
+# Entries Bambu Studio requires before it treats the archive as a project rather
+# than loose geometry, in the order it walks the zip. `model_settings.config` has
+# to precede `slice_info.config`: the plate referenced by slice_info's
+# `<metadata key="index">` is only known once model_settings declared it.
+REQUIRED_ENTRIES: tuple[str, ...] = (
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "3D/3dmodel.model",
+    "Metadata/project_settings.config",
+    "Metadata/model_settings.config",
+    "Metadata/slice_info.config",
+)
+
+
+class ProjectArchiveError(RuntimeError):
+    """Raised when a packed archive would not open as a Bambu Studio project."""
 
 
 def _a(value: object) -> str:
@@ -111,7 +134,8 @@ class ProjectPackager:
         model_xml, model_settings, object_ids = self._build_model_documents(
             working, colors, model_name, object_settings=object_settings
         )
-        content_types, rels, slice_info = self._static_xml()
+        content_types, rels = self._static_xml()
+        slice_info = self._slice_info_xml(settings, colors)
 
         embed_settings = {k: v for k, v in settings.items() if not str(k).startswith("_")}
         sidecar = {
@@ -140,22 +164,26 @@ class ProjectPackager:
         if meta:
             sidecar["auto_slicer"] = meta
 
-        buf = BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("[Content_Types].xml", content_types)
-            zf.writestr("_rels/.rels", rels)
-            zf.writestr("3D/3dmodel.model", model_xml)
-            zf.writestr(
+        entries: list[tuple[str, str]] = [
+            ("[Content_Types].xml", content_types),
+            ("_rels/.rels", rels),
+            ("3D/3dmodel.model", model_xml),
+            (
                 "Metadata/project_settings.config",
                 json.dumps(embed_settings, indent=4, ensure_ascii=False),
-            )
-            zf.writestr("Metadata/model_settings.config", model_settings)
-            zf.writestr("Metadata/slice_info.config", slice_info)
-            zf.writestr(
-                "Metadata/auto_slicer.json",
-                json.dumps(sidecar, indent=2, ensure_ascii=False),
-            )
-        return buf.getvalue()
+            ),
+            ("Metadata/model_settings.config", model_settings),
+            ("Metadata/slice_info.config", slice_info),
+            ("Metadata/auto_slicer.json", json.dumps(sidecar, indent=2, ensure_ascii=False)),
+        ]
+
+        buf = BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, payload in entries:
+                zf.writestr(name, payload)
+        data = buf.getvalue()
+        verify_project_archive(data)
+        return data
 
     def _prepare_assembly(self, assembly: MeshAssembly) -> MeshAssembly:
         working = MeshAssembly(
@@ -312,7 +340,9 @@ class ProjectPackager:
 </model>
 """
 
-        filament_map = " ".join(str(i) for i in range(1, max(len(colors), 1) + 1))
+        # Single-extruder machine: every filament slot maps to extruder 1. Studio
+        # reads this as `filament_maps` (plural) — `filament_map` is ignored.
+        filament_maps = " ".join("1" for _ in range(max(len(colors), 1)))
         model_settings = f"""<?xml version="1.0" encoding="UTF-8"?>
 <config>
 {object_config}
@@ -320,8 +350,10 @@ class ProjectPackager:
     <metadata key="plater_id" value="1"/>
     <metadata key="plater_name" value="Plate 1"/>
     <metadata key="locked" value="false"/>
+    <metadata key="bed_type" value="{STUDIO_BED_TYPE}"/>
+    <metadata key="print_sequence" value="by layer"/>
     <metadata key="filament_map_mode" value="Auto For Flush"/>
-    <metadata key="filament_map" value="{filament_map}"/>
+    <metadata key="filament_maps" value="{filament_maps}"/>
 {instances_xml}
   </plate>
   <assemble>
@@ -333,7 +365,44 @@ class ProjectPackager:
         return model_xml, model_settings, id_map
 
     @staticmethod
-    def _static_xml() -> tuple[str, str, str]:
+    def _slice_info_xml(settings: dict[str, Any], colors: list[str]) -> str:
+        """`Metadata/slice_info.config` — the plate manifest of a project archive.
+
+        Studio binds the `<plate>` here to the plate declared in
+        `model_settings.config` via `<metadata key="index">`, then reads the printer
+        and filament identity off it. Nothing in the importer sets `is_sliced_valid`,
+        so declaring a plate cannot make an unsliced project look pre-sliced.
+        """
+        nozzle = str(first_scalar(settings.get("nozzle_diameter")) or "0.4")
+        types = settings.get("filament_type") or []
+        ids = settings.get("filament_ids") or []
+        rows = []
+        for index, color in enumerate(colors or ["#FFFFFFFF"], start=1):
+            filament_type = str(types[index - 1]) if index <= len(types) else "PLA"
+            tray_id = str(ids[index - 1]) if index <= len(ids) else ""
+            rows.append(
+                f'    <filament id="{index}" type="{_a(filament_type)}" '
+                f'color="{_a(color)}" tray_info_idx="{_a(tray_id)}" '
+                f'nozzle_diameter="{_a(nozzle)}" used_m="0.00" used_g="0.00"/>'
+            )
+        filaments = "\n".join(rows)
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <header>
+    <header_item key="X-BBL-Client-Type" value="slicer"/>
+    <header_item key="X-BBL-Client-Version" value="{STUDIO_VERSION}"/>
+  </header>
+  <plate>
+    <metadata key="index" value="1"/>
+    <metadata key="printer_model_id" value="{PRINTER_MODEL_ID}"/>
+    <metadata key="nozzle_diameters" value="{_a(nozzle)}"/>
+{filaments}
+  </plate>
+</config>
+"""
+
+    @staticmethod
+    def _static_xml() -> tuple[str, str]:
         content_types = """<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
@@ -342,6 +411,7 @@ class ProjectPackager:
   <Default Extension="gcode" ContentType="text/x.gcode"/>
   <Default Extension="json" ContentType="application/json"/>
   <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="config" ContentType="application/xml"/>
 </Types>
 """
         rels = """<?xml version="1.0" encoding="UTF-8"?>
@@ -351,12 +421,29 @@ class ProjectPackager:
     Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
 </Relationships>
 """
-        slice_info = """<?xml version="1.0" encoding="UTF-8"?>
-<config>
-  <header>
-    <header_item key="X-BBL-Client-Type" value="slicer"/>
-    <header_item key="X-BBL-Client-Version" value="02.06.00.51"/>
-  </header>
-</config>
-"""
-        return content_types, rels, slice_info
+        return content_types, rels
+
+
+def verify_project_archive(data: bytes) -> list[str]:
+    """Assert a packed `.3mf` has the layout Bambu Studio needs, return its entries.
+
+    Guards the two failure modes that make Studio silently fall back to loose
+    geometry with the last-used profile: a missing sidecar, or `slice_info.config`
+    landing before the `model_settings.config` plate it refers to.
+    """
+    with zipfile.ZipFile(BytesIO(data)) as zf:
+        names = zf.namelist()
+        bad = zf.testzip()
+    if bad is not None:
+        raise ProjectArchiveError(f"corrupt entry in project archive: {bad}")
+
+    missing = [entry for entry in REQUIRED_ENTRIES if entry not in names]
+    if missing:
+        raise ProjectArchiveError(
+            "project archive is missing required entries: " + ", ".join(missing)
+        )
+    if names.index("Metadata/model_settings.config") > names.index("Metadata/slice_info.config"):
+        raise ProjectArchiveError(
+            "Metadata/model_settings.config must precede Metadata/slice_info.config"
+        )
+    return names
