@@ -4,10 +4,13 @@
     Creates a "Bambu AI Studio" desktop shortcut that launches start_app.bat.
 
 .DESCRIPTION
-    Uses the WScript.Shell COM object to write Bambu AI Studio.lnk onto every
+    Uses the WScript.Shell COM object to write two .lnk files onto every
     detected Desktop folder (local profile Desktop and OneDrive-redirected
-    Desktop paths). Target and working directory are absolute paths to this
-    repository so the shortcut works regardless of the current directory.
+    Desktop paths):
+      - Bambu AI Studio.lnk          → start_app.bat
+      - Bambu AI Studio - Durdur.lnk → stop_app.bat
+    Target and working directory are absolute paths to this repository so the
+    shortcut works regardless of the current directory.
 
     Icon: backend\.venv\Scripts\python.exe when present, otherwise a standard
     Windows system icon.
@@ -143,11 +146,18 @@ function Get-ShortcutIconLocation {
 
 $repoRoot = Get-RepoRoot
 $startBat = Join-Path $repoRoot 'start_app.bat'
+$stopBat  = Join-Path $repoRoot 'stop_app.bat'
 
 if (-not (Test-Path -LiteralPath $startBat -PathType Leaf)) {
     Write-Host "ERROR: start_app.bat not found at:" -ForegroundColor Red
     Write-Host "  $startBat"
     Write-Host "Run this script from the repository root."
+    exit 1
+}
+
+if (-not (Test-Path -LiteralPath $stopBat -PathType Leaf)) {
+    Write-Host "ERROR: stop_app.bat not found at:" -ForegroundColor Red
+    Write-Host "  $stopBat"
     exit 1
 }
 
@@ -169,11 +179,22 @@ try {
         $shortcut.TargetPath       = $startBat
         $shortcut.WorkingDirectory = $repoRoot
         $shortcut.WindowStyle      = 1
-        $shortcut.Description      = 'Launch Bambu AI Studio (FastAPI backend + Vite frontend)'
+        $shortcut.Description      = 'Bambu AI Studio baslat (API + arayuz)'
         $shortcut.IconLocation     = $icon
         $shortcut.Save()
         [void]$created.Add($lnkPath)
         Write-Host "Created: $lnkPath" -ForegroundColor Green
+
+        $stopPath = Join-Path $desktop 'Bambu AI Studio - Durdur.lnk'
+        $stop = $wsh.CreateShortcut($stopPath)
+        $stop.TargetPath       = $stopBat
+        $stop.WorkingDirectory = $repoRoot
+        $stop.WindowStyle      = 1
+        $stop.Description      = 'Bambu AI Studio durdur (port 8000 / 5173)'
+        $stop.IconLocation     = (Join-Path $env:SystemRoot 'System32\shell32.dll') + ',27'
+        $stop.Save()
+        [void]$created.Add($stopPath)
+        Write-Host "Created: $stopPath" -ForegroundColor Green
     }
 }
 finally {
@@ -184,9 +205,10 @@ finally {
 
 Write-Host ""
 Write-Host ("Created {0} shortcut(s)." -f $created.Count)
-Write-Host "Shortcut name : Bambu AI Studio.lnk"
-Write-Host "Target        : $startBat"
-Write-Host "Working dir   : $repoRoot"
-Write-Host "Icon          : $icon"
+Write-Host "Start shortcut : Bambu AI Studio.lnk"
+Write-Host "Stop shortcut  : Bambu AI Studio - Durdur.lnk"
+Write-Host "Target         : $startBat"
+Write-Host "Working dir    : $repoRoot"
+Write-Host "Icon           : $icon"
 Write-Host ""
-Write-Host "Double-click the desktop shortcut to start the app."
+Write-Host "Masaustundeki Bambu AI Studio kisayoluna cift tikla."
