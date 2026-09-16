@@ -41,6 +41,37 @@ python auto_slicer.py model.glb -o out.json -v
 
 Windows ve Linux **aynı uygulama kodunu** çalıştırır. Fark yalnızca başlatıcıdadır (`start_app.bat` / `start_app.sh`). VS Code'da doğru dalı (`main` veya bu PR) açtığından emin ol; eski `main` MVP arayüzü, güncel dal 3D önizleme + filament UX içerir.
 
+### What makes the exported `.3mf` a project archive
+
+Bambu Studio does not read `Metadata/project_settings.config` as a profile. On import it
+splits that JSON into a process preset, N filament presets and a printer preset, then
+re-binds each one to an *installed* system preset. Two vectors drive that, both sized
+`N + 2` and ordered `[process, filament_1..filament_N, printer]`:
+
+| Key | Role |
+|-----|------|
+| `inherits_group` | the system preset each split preset inherits from |
+| `different_settings_to_system` | the keys Studio keeps as project overrides; anything omitted is reset to the base preset's value |
+
+The printer entry of `different_settings_to_system` is intentionally empty so Studio
+resets every machine key to the stock P2S values rather than keeping the bed shape and
+G-code inherited from the A1 template the exporter starts from.
+
+`ProjectPackager` writes the entries in a fixed order — `[Content_Types].xml`,
+`_rels/.rels`, `3D/3dmodel.model`, `Metadata/project_settings.config`,
+`Metadata/model_settings.config`, `Metadata/slice_info.config` — because the plate that
+`slice_info.config` references is only known once `model_settings.config` has declared
+it. `verify_project_archive()` enforces this on every export.
+
+**Preset names must exist.** An `inherits` naming a preset Studio cannot resolve behaves
+exactly like having no base at all, which is what makes a project open under the
+last-used profile. There is no `0.28mm Standard @BBL P2S`: on a 0.4 nozzle the coarsest
+stock P2S process preset is `0.24mm Standard @BBL P2S`. A calculated 0.28 mm project
+therefore inherits from that preset and carries `layer_height` as a listed diff, so
+Studio shows `0.24mm Standard @BBL P2S` marked as modified with 0.28 mm in the parameter
+panel. `slicer_pipeline/studio_profile.py` holds the per-nozzle tables of presets that
+actually ship in `resources/profiles/BBL`.
+
 ## Çalıştırma
 
 Linux / macOS — tek tık:
