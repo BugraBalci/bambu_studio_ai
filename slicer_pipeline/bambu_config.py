@@ -18,6 +18,7 @@ from slicer_pipeline.geometry import GeometryMetrics
 from slicer_pipeline.rules import RuleResult
 from slicer_pipeline.studio_profile import (
     PRINTER_VARIANT_DIAMETER,
+    UNSUPPORTED_KEYS,
     stamp_p2s_project_headers,
 )
 
@@ -83,7 +84,8 @@ class BambuConfigEngine:
             "nozzle_temperature": ["220"],
             "nozzle_temperature_initial_layer": ["220"],
             "filament_type": ["PLA"],
-            "bed_temperature": ["60"],
+            "hot_plate_temp": ["60"],
+            "hot_plate_temp_initial_layer": ["60"],
             "textured_plate_temp": ["60"],
             "textured_plate_temp_initial_layer": ["60"],
             **P2S_IDENTITY,
@@ -152,6 +154,8 @@ class BambuConfigEngine:
             if key.startswith("_"):
                 continue
             dest_key = KEY_ALIASES.get(key, key)
+            if dest_key in UNSUPPORTED_KEYS:
+                continue
             if dest_key in settings:
                 settings[dest_key] = coerce_to_template(value, settings[dest_key])
             else:
@@ -185,6 +189,8 @@ class BambuConfigEngine:
             "upward_compatible_machine",
             "print_compatible_printers",
             "different_settings_to_system",
+            "inherits_group",
+            "filament_self_index",
             "nozzle_diameter",
         }
         for key, value in list(settings.items()):
@@ -213,6 +219,14 @@ class BambuConfigEngine:
             if len(settings["filament_type"]) < n:
                 fill = settings["filament_type"][0] if settings["filament_type"] else "PLA"
                 settings["filament_type"] = (list(settings["filament_type"]) + [fill] * n)[:n]
+        # `load_config_file_config` rejects the archive outright unless
+        # filament_self_index and filament_extruder_variant both line up with the
+        # filament count, and filament_map assigns every slot to an extruder.
+        settings["filament_self_index"] = [str(i + 1) for i in range(n)]
+        variant = settings.get("filament_extruder_variant")
+        if isinstance(variant, list) and variant:
+            settings["filament_extruder_variant"] = [str(variant[0])] * n
+        settings["filament_map"] = ["1"] * n
         if slot_profiles:
             settings = self._apply_slot_profiles(settings, slot_profiles, n)
         return stamp_p2s_project_headers(settings)

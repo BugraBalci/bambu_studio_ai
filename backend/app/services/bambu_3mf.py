@@ -23,14 +23,17 @@ from slicer_pipeline.bambu_config import BambuConfigEngine  # noqa: E402
 from slicer_pipeline.mesh_parser import MeshParser  # noqa: E402
 from slicer_pipeline.project_packager import ProjectPackager  # noqa: E402
 from slicer_pipeline.studio_profile import (  # noqa: E402
-    PRINTER_VARIANT_DIAMETER,
+    clamp_layer_height,
     first_scalar,
     fmt_bool01,
     fmt_float,
     fmt_percent,
     generic_filament_settings_id,
+    nozzle_variant,
     optional_hint,
     print_settings_id_for,
+    printer_settings_id_for,
+    retarget_to_p2s,
 )
 
 TEMPLATE_PATH = ROOT_DIR / "profiles" / "bambu_project_settings_template.json"
@@ -43,60 +46,86 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
-def _filament_arrays(rec: PrintRecommendation, hints: dict[str, Any]) -> dict[str, Any]:
-    """Bambu stores many filament keys as length-1 arrays of strings."""
-    if rec.filament_slots:
-        slot = rec.filament_slots[0]
-        nozzle = str(_as_int(optional_hint(hints, "nozzle_temperature", slot.nozzle_temp_c), slot.nozzle_temp_c))
-        bed = str(_as_int(optional_hint(hints, "bed_temperature", slot.bed_temp_c), slot.bed_temp_c))
-        filament_type = str(optional_hint(hints, "filament_type", slot.studio_type))
-        settings_id = slot.filament_settings_id or generic_filament_settings_id(slot.material)
-        return {
-            "filament_type": [filament_type],
-            "filament_ids": [slot.filament_ids],
-            "filament_settings_id": [settings_id],
-            "default_filament_profile": [settings_id],
-            "nozzle_temperature": [nozzle],
-            "nozzle_temperature_initial_layer": [nozzle],
-            "bed_temperature": [bed],
-            "cool_plate_temp": [bed],
-            "cool_plate_temp_initial_layer": [bed],
-            "eng_plate_temp": [bed],
-            "eng_plate_temp_initial_layer": [bed],
-            "hot_plate_temp": [bed],
-            "hot_plate_temp_initial_layer": [bed],
-            "textured_plate_temp": [bed],
-            "textured_plate_temp_initial_layer": [bed],
-        }
-    preset = studio_preset(rec.material)
-    nozzle = str(_as_int(optional_hint(hints, "nozzle_temperature", rec.nozzle_temp_c), rec.nozzle_temp_c))
-    bed = str(_as_int(optional_hint(hints, "bed_temperature", rec.bed_temp_c), rec.bed_temp_c))
-    filament_type = str(optional_hint(hints, "filament_type", preset["studio_type"]))
-    settings_id = str(preset["filament_settings_id"])
-    return {
+# Studio has no `bed_temperature` option: bed heat is per plate surface, and the
+# active surface comes from `curr_bed_type` (Textured PEI Plate for the P2S).
+_PLATE_TEMP_KEYS: tuple[str, ...] = (
+    "cool_plate_temp",
+    "cool_plate_temp_initial_layer",
+    "eng_plate_temp",
+    "eng_plate_temp_initial_layer",
+    "hot_plate_temp",
+    "hot_plate_temp_initial_layer",
+    "textured_plate_temp",
+    "textured_plate_temp_initial_layer",
+    "supertack_plate_temp",
+    "supertack_plate_temp_initial_layer",
+)
+
+
+def _filament_column(
+    filament_type: str,
+    filament_ids: str,
+    settings_id: str,
+    nozzle_temp: str,
+    bed_temp: str,
+) -> dict[str, Any]:
+    """Bambu stores per-filament keys as arrays; one slot → length-1 arrays."""
+    column: dict[str, Any] = {
         "filament_type": [filament_type],
-        "filament_ids": [preset["filament_ids"]],
+        "filament_ids": [filament_ids],
         "filament_settings_id": [settings_id],
         "default_filament_profile": [settings_id],
-        "nozzle_temperature": [nozzle],
-        "nozzle_temperature_initial_layer": [nozzle],
-        "bed_temperature": [bed],
-        "cool_plate_temp": [bed],
-        "cool_plate_temp_initial_layer": [bed],
-        "eng_plate_temp": [bed],
-        "eng_plate_temp_initial_layer": [bed],
-        "hot_plate_temp": [bed],
-        "hot_plate_temp_initial_layer": [bed],
-        "textured_plate_temp": [bed],
-        "textured_plate_temp_initial_layer": [bed],
+        "nozzle_temperature": [nozzle_temp],
+        "nozzle_temperature_initial_layer": [nozzle_temp],
     }
+    column.update({key: [bed_temp] for key in _PLATE_TEMP_KEYS})
+    return column
+
+
+def _filament_arrays(rec: PrintRecommendation, hints: dict[str, Any]) -> dict[str, Any]:
+    if rec.filament_slots:
+        slot = rec.filament_slots[0]
+        return _filament_column(
+            filament_type=str(optional_hint(hints, "filament_type", slot.studio_type)),
+            filament_ids=str(slot.filament_ids),
+            settings_id=retarget_to_p2s(
+                slot.filament_settings_id or generic_filament_settings_id(slot.material)
+            ),
+            nozzle_temp=str(
+                _as_int(
+                    optional_hint(hints, "nozzle_temperature", slot.nozzle_temp_c),
+                    slot.nozzle_temp_c,
+                )
+            ),
+            bed_temp=str(
+                _as_int(optional_hint(hints, "bed_temperature", slot.bed_temp_c), slot.bed_temp_c)
+            ),
+        )
+    preset = studio_preset(rec.material)
+    return _filament_column(
+        filament_type=str(optional_hint(hints, "filament_type", preset["studio_type"])),
+        filament_ids=str(preset["filament_ids"]),
+        settings_id=retarget_to_p2s(preset["filament_settings_id"]),
+        nozzle_temp=str(
+            _as_int(
+                optional_hint(hints, "nozzle_temperature", rec.nozzle_temp_c), rec.nozzle_temp_c
+            )
+        ),
+        bed_temp=str(
+            _as_int(optional_hint(hints, "bed_temperature", rec.bed_temp_c), rec.bed_temp_c)
+        ),
+    )
 
 
 def recommendation_to_project_overrides(rec: PrintRecommendation) -> dict[str, Any]:
     """Map Rule Engine / slicer_hints onto Bambu Studio project_settings keys."""
     hints = rec.slicer_hints or {}
-    nozzle = first_scalar(optional_hint(hints, "nozzle_diameter", rec.nozzle_mm)) or rec.nozzle_mm
-    layer = first_scalar(optional_hint(hints, "layer_height", rec.layer_height_mm))
+    nozzle = nozzle_variant(
+        first_scalar(optional_hint(hints, "nozzle_diameter", rec.nozzle_mm)) or rec.nozzle_mm
+    )
+    layer = clamp_layer_height(
+        first_scalar(optional_hint(hints, "layer_height", rec.layer_height_mm)), nozzle
+    )
     walls = _as_int(optional_hint(hints, "wall_loops", rec.wall_loops), rec.wall_loops)
     density = fmt_percent(optional_hint(hints, "sparse_infill_density", rec.infill_percent))
     pattern = str(optional_hint(hints, "sparse_infill_pattern", rec.infill_pattern) or "grid")
@@ -124,20 +153,28 @@ def recommendation_to_project_overrides(rec: PrintRecommendation) -> dict[str, A
         if rec.supports and rec.support_type and rec.support_type != "none"
         else ("tree(auto)" if rec.supports else "normal(auto)"),
     )
+    initial_layer = _as_int(optional_hint(hints, "initial_layer_speed", 50), 50)
     layer_text = fmt_float(layer)
     process_name = print_settings_id_for(layer, nozzle)
+    printer_name = printer_settings_id_for(nozzle)
     overrides: dict[str, Any] = {
         "printer_model": "Bambu Lab P2S",
-        "printer_variant": PRINTER_VARIANT_DIAMETER,
-        "printer_settings_id": "Bambu Lab P2S 0.4 nozzle",
+        "printer_variant": nozzle,
+        "printer_settings_id": printer_name,
         "print_settings_id": process_name,
         "default_print_profile": process_name,
-        "print_compatible_printers": ["Bambu Lab P2S 0.4 nozzle"],
+        "print_compatible_printers": [printer_name],
+        # The process preset the calculated values are a diff against. Bambu Studio
+        # resolves this through inherits_group and resets any key that is not listed
+        # in different_settings_to_system, so it has to name an installed preset.
+        "inherits": process_name,
         "from": "project",
         "name": "project_settings",
-        "nozzle_diameter": [fmt_float(nozzle)],
+        "nozzle_diameter": [nozzle],
         "layer_height": layer_text,
-        "initial_layer_print_height": fmt_float(min(float(layer), 0.2)),
+        # A calculated 0.28 mm project prints its first layer at 0.28 too; clamping
+        # this to 0.2 is what made Studio look like it had loaded a 0.2 mm profile.
+        "initial_layer_print_height": layer_text,
         "wall_loops": str(walls),
         "sparse_infill_density": density,
         "sparse_infill_pattern": pattern,
@@ -152,6 +189,7 @@ def recommendation_to_project_overrides(rec: PrintRecommendation) -> dict[str, A
         "sparse_infill_speed": str(sparse),
         "internal_solid_infill_speed": str(print_speed),
         "top_surface_speed": str(min(outer, 100)),
+        "initial_layer_speed": str(initial_layer),
         "print_sequence": "by layer",
     }
     overrides.update(_filament_arrays(rec, hints))
