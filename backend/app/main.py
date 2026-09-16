@@ -58,6 +58,7 @@ def on_startup() -> None:
     init_db()
 
 
+@app.get("/")
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "printer": "Bambu Lab P2S"}

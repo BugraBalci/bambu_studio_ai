@@ -25,27 +25,41 @@ npm install
 
 ## Çalıştırma
 
-Terminal 1 — API:
+Tek komut (Windows): `start_app.bat` veya `start_app.ps1`
+
+Linux / macOS — Terminal 1, API:
 
 ```bash
+./run.sh api
+# eşdeğeri:
 cd backend
 source .venv/bin/activate
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+export PYTHONPATH="$PWD/..:$PWD"
+python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+`main:app` `backend/main.py` üzerinden `app` nesnesini yükler (`from app.main import app`).
+`python -m uvicorn app.main:app` de aynı uygulamayı açar.
+
+Sağlık kontrolü: http://127.0.0.1:8000/api/health → `{"status":"ok",...}`
 
 Terminal 2 — UI:
 
 ```bash
+./run.sh ui
+# eşdeğeri:
 cd frontend
 npm run dev
 ```
 
-Tarayıcı: http://127.0.0.1:5173
+Tarayıcı: http://127.0.0.1:5173  
+Vite `/api` isteklerini `http://127.0.0.1:8000` adresine proxy'ler.
 
 ## API
 
 | Endpoint | Açıklama |
 |----------|----------|
+| `GET /` ve `GET /api/health` | Servis sağlık kontrolü |
 | `POST /api/analyze` | STL yükle, geometri metrikleri |
 | `POST /api/recommend` | Amaç + sağlamlık → baskı önerisi |
 | `POST /api/recommend/export-profile` | Faz B için profil JSON indir |
