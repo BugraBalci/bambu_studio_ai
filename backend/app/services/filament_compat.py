@@ -158,6 +158,46 @@ def color_name_from_hex(value: str | None) -> tuple[str, list[str]]:
     return best_name, list(best_aliases)
 
 
+def hex_from_color_name(value: str | None, default: str = "#1C1C1CFF") -> str:
+    needle = str(value or "").strip().lower()
+    if needle.startswith("#") and len(needle) in {7, 9}:
+        return rgba_hex(needle)
+    for _name, rgb, aliases in _NAMED_COLORS:
+        names = (_name.lower(), *[alias.lower() for alias in aliases])
+        if needle and any(needle == n or needle in n or n in needle for n in names):
+            return f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}FF"
+    return rgba_hex(default)
+
+
+def text_filament_slot(
+    *,
+    extruder: int,
+    color_hex: str,
+    inventory_row: dict[str, Any] | None = None,
+    fallback_material: str = "PLA",
+) -> FilamentSlotPlan:
+    material = normalize_material((inventory_row or {}).get("material") or fallback_material)
+    preset = studio_preset(material)
+    name, _ = color_name_from_hex(color_hex)
+    return FilamentSlotPlan(
+        color_id="text",
+        color_hex=display_hex(color_hex),
+        color_name=f"Yazı ({name})",
+        extruder=int(extruder),
+        filament_id=int(inventory_row["id"]) if inventory_row and inventory_row.get("id") is not None else None,
+        material=preset["material"],
+        studio_type=preset["studio_type"],
+        nozzle_temp_c=int(preset["nozzle_temp_c"]),
+        bed_temp_c=int(preset["bed_temp_c"]),
+        nozzle_range_low=int(preset["nozzle_range_low"]),
+        nozzle_range_high=int(preset["nozzle_range_high"]),
+        filament_ids=str(preset["filament_ids"]),
+        filament_settings_id=str(preset["filament_settings_id"]),
+        label=filament_label(inventory_row, preset["material"]),
+        slot=(inventory_row.get("slot") or "") if inventory_row else f"AMS-{extruder}",
+    )
+
+
 def filament_label(item: dict[str, Any] | None, material: str | None = None) -> str:
     if not item:
         return f"Önerilen {material or 'PLA'}"

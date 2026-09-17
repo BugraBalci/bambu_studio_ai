@@ -288,6 +288,42 @@ export function frameOrbitCamera(THREE, camera, controls, object) {
   return { size, center, maxDim }
 }
 
+/**
+ * Map backend (Z-up slicer) text vertices onto the aligned Three.js host bbox.
+ */
+export function slicerOverlayGeometry(THREE, overlay, hostBox) {
+  const verts = overlay?.vertices
+  const faces = overlay?.faces
+  const bmin = overlay?.host_bounds_min
+  const bmax = overlay?.host_bounds_max
+  if (!verts?.length || !faces?.length || !bmin?.length || !bmax?.length || !hostBox || hostBox.isEmpty()) {
+    return null
+  }
+  const tmin = [bmin[0], bmin[2], -bmax[1]]
+  const tmax = [bmax[0], bmax[2], -bmin[1]]
+  const sx = (hostBox.max.x - hostBox.min.x) / Math.max(tmax[0] - tmin[0], 1e-6)
+  const sy = (hostBox.max.y - hostBox.min.y) / Math.max(tmax[1] - tmin[1], 1e-6)
+  const sz = (hostBox.max.z - hostBox.min.z) / Math.max(tmax[2] - tmin[2], 1e-6)
+  const positions = new Float32Array(faces.length * 9)
+  let cursor = 0
+  for (let t = 0; t < faces.length; t += 1) {
+    const tri = faces[t]
+    if (!tri || tri.length < 3) continue
+    for (let k = 0; k < 3; k += 1) {
+      const p = verts[tri[k]]
+      if (!p) continue
+      positions[cursor++] = hostBox.min.x + (p[0] - tmin[0]) * sx
+      positions[cursor++] = hostBox.min.y + (p[2] - tmin[1]) * sy
+      positions[cursor++] = hostBox.min.z + (-p[1] - tmin[2]) * sz
+    }
+  }
+  if (!cursor) return null
+  const geom = new THREE.BufferGeometry()
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions.subarray(0, cursor), 3))
+  geom.computeVertexNormals()
+  return geom
+}
+
 function setupPreviewLights(THREE, scene) {
   scene.add(new THREE.AmbientLight(0xffffff, 1.2))
   const key = new THREE.DirectionalLight(0xffffff, 1.5)

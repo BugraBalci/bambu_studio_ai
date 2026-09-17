@@ -43,6 +43,7 @@ export default function ModelPreviewCard({
   onPickFile,
   onViewportReady,
   onViewportError,
+  overlay = null,
 }) {
   const badge = badgeFor({ status, analyzing, backendReady })
   const showMeta = status !== 'idle'
@@ -66,7 +67,7 @@ export default function ModelPreviewCard({
 
         {file && status !== 'error' ? (
           <>
-            <ModelViewport file={file} onReady={onViewportReady} onError={onViewportError} />
+            <ModelViewport file={file} onReady={onViewportReady} onError={onViewportError} overlay={overlay} />
             {status === 'loading' ? (
               <div className="preview-skeleton preview-overlay">
                 <div className="spinner" />

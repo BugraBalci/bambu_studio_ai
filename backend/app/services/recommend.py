@@ -16,6 +16,7 @@ from app.schemas import (
     PrintRecommendation,
     Purpose,
     Strength,
+    TextCustomization,
 )
 from app.services.filament_compat import plan_filament_slots, validate_filament_slots
 from app.services.rules import (
@@ -286,6 +287,7 @@ def _rule_only_recommendation(
     notes: str | None,
     preferred_filament_id: int | None = None,
     color_filament_map: list[ColorSlotMapping] | None = None,
+    apply_fuzzy_skin: bool = False,
 ) -> PrintRecommendation:
     base = baseline_for(purpose, strength)
     base = apply_geometry_overrides(base, geometry)
@@ -319,12 +321,52 @@ def _rule_only_recommendation(
         rationale_parts.append(data["missing_filament_warning"])
     data["rationale"] = " ".join(rationale_parts)
     data = attach_support_and_reasons(data, geometry)
+    data["apply_fuzzy_skin"] = bool(apply_fuzzy_skin and data.get("fuzzy_skin_recommended"))
     data["slicer_hints"] = build_slicer_hints(data)
     data["schema_version"] = "1.0"
     data = _attach_filament_plan(
         data, geometry, inventory, color_filament_map, purpose, strength
     )
     return PrintRecommendation(**data)
+
+
+def _finish_recommendation(
+    rec: PrintRecommendation,
+    geometry: GeometryMetrics,
+    inventory: list[dict[str, Any]],
+    text: TextCustomization | None,
+) -> PrintRecommendation:
+    from app.services.text_custom import attach_text_to_recommendation, resolve_text_spec
+
+    spec = resolve_text_spec(text, inventory, rec.material)
+    if spec is None:
+        return rec
+    wrap = spec.surface_mode == "curved" or (
+        spec.surface_mode == "auto" and bool(getattr(geometry, "wrap_recommended", False))
+    )
+    box = geometry.bounding_box_mm or [20.0, 20.0, 20.0]
+    letter_h = spec.size_mm
+    if letter_h is None:
+        letter_h = min(18.0, max(6.0, 0.22 * min(float(box[0]), float(box[1]))))
+    row = next(
+        (
+            item
+            for item in inventory
+            if spec.filament_id is not None and int(item.get("id") or 0) == int(spec.filament_id)
+        ),
+        None,
+    )
+    rec = attach_text_to_recommendation(
+        rec,
+        spec,
+        wrap_applied=wrap,
+        letter_height_mm=float(letter_h),
+        inventory_row=row,
+    )
+    extra = rec.text_explanation
+    if extra and extra not in (rec.rationale or ""):
+        rec.rationale = f"{rec.rationale} {extra}".strip()
+    return rec
 
 
 def recommend(
@@ -336,6 +378,8 @@ def recommend(
     notes: str | None = None,
     preferred_filament_id: int | None = None,
     color_filament_map: list[ColorSlotMapping] | None = None,
+    apply_fuzzy_skin: bool = False,
+    text: TextCustomization | None = None,
 ) -> tuple[PrintRecommendation, bool, dict[str, Any]]:
     settings = get_settings()
     inventory = _inventory_payload(db)
@@ -353,7 +397,9 @@ def recommend(
             notes,
             preferred_filament_id,
             color_filament_map,
+            apply_fuzzy_skin,
         )
+        rec = _finish_recommendation(rec, geometry, inventory, text)
         return rec, False, baseline
 
     client = OpenAI(api_key=settings.openai_api_key)
@@ -420,6 +466,7 @@ def recommend(
             ).strip()
 
         data = attach_support_and_reasons(data, geometry)
+        data["apply_fuzzy_skin"] = bool(apply_fuzzy_skin and data.get("fuzzy_skin_recommended"))
         data["slicer_hints"] = build_slicer_hints(data)
         data["schema_version"] = "1.0"
         if not data.get("rationale"):
@@ -427,7 +474,8 @@ def recommend(
         data = _attach_filament_plan(
             data, geometry, inventory, color_filament_map, purpose, strength
         )
-        return PrintRecommendation(**data), True, baseline
+        rec = _finish_recommendation(PrintRecommendation(**data), geometry, inventory, text)
+        return rec, True, baseline
     except Exception:
         rec = _rule_only_recommendation(
             geometry,
@@ -438,7 +486,9 @@ def recommend(
             notes,
             preferred_filament_id,
             color_filament_map,
+            apply_fuzzy_skin,
         )
+        rec = _finish_recommendation(rec, geometry, inventory, text)
         return rec, False, baseline
 
 

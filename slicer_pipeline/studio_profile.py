@@ -107,6 +107,12 @@ PROCESS_DIFF_KEYS: tuple[str, ...] = (
     "wall_generator",
     "top_shell_layers",
     "bottom_shell_layers",
+    "line_width",
+    "outer_wall_line_width",
+    "initial_layer_line_width",
+    "fuzzy_skin",
+    "fuzzy_skin_point_distance",
+    "fuzzy_skin_thickness",
 )
 
 # Bambu has no `bed_temperature` option; bed heat lives on the per-plate keys.
@@ -148,6 +154,11 @@ OBJECT_PROCESS_KEYS: tuple[str, ...] = (
     "support_type",
     "brim_type",
     "brim_width",
+    "wall_generator",
+    "line_width",
+    "outer_wall_line_width",
+    "initial_layer_line_width",
+    "outer_wall_speed",
 )
 
 P2S_PROJECT_IDENTITY = {

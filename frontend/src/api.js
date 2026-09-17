@@ -77,6 +77,14 @@ export function validateFilamentMap(payload) {
   })
 }
 
+export function previewText(payload) {
+  return request('/text/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
 export function listFilaments() {
   return request('/filaments')
 }

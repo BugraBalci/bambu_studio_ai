@@ -278,6 +278,8 @@ class MeshPart:
     paint_color: Optional[list[str | None]] = None
     material_pid: Optional[str] = None
     material_pindex: Optional[str] = None
+    subtype: str = "normal_part"
+    lock_extruder: bool = False
 
     def world_mesh(self) -> trimesh.Trimesh:
         m = self.mesh.copy()
@@ -362,6 +364,16 @@ class MeshAssembly:
             palette = ["#FFFFFFFF"]
         for part in self.parts:
             hex_color = part.color_hex or palette[0]
+            if hex_color not in palette:
+                palette.append(hex_color)
+            if part.lock_extruder:
+                idx = min(max(int(part.extruder) - 1, 0), cap - 1)
+                while len(palette) <= idx:
+                    palette.append(hex_color)
+                palette[idx] = hex_color
+                part.extruder = idx + 1
+                part.color_hex = hex_color
+                continue
             idx = palette.index(hex_color) if hex_color in palette else 0
             part.extruder = min(idx, cap - 1) + 1
         self.materials = palette[:cap] if len(palette) > cap else palette

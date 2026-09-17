@@ -68,6 +68,23 @@ class GeometryMetrics(BaseModel):
     part_count: int = 1
     color_count: int = 1
     colors: list[DetectedColor] = Field(default_factory=list)
+    hull_line_risk: bool = False
+    hull_line_shell_thickness_mm: float = 0.0
+    hull_line_z_mm: list[float] = Field(default_factory=list)
+    hull_line_note: str = ""
+    hull_line_explanation: str = ""
+    fine_text_detected: bool = False
+    fine_stroke_width_mm: float = 0.0
+    fine_text_on_skin: bool = False
+    fine_text_note: str = ""
+    fine_text_explanation: str = ""
+    is_miniature: bool = False
+    obb_extents_mm: list[float] = Field(default_factory=list)
+    miniature_explanation: str = ""
+    target_surface_kind: str = "planar"
+    wrap_recommended: bool = False
+    target_surface_note: str = ""
+    cylinder_radius_mm: float = 0.0
 
 
 class FilamentBase(BaseModel):
@@ -96,6 +113,32 @@ class FilamentOut(FilamentBase):
     id: int
 
     model_config = {"from_attributes": True}
+
+
+class TextStyle(str, Enum):
+    flush = "flush"
+    embossed = "embossed"
+
+
+class TextSurfaceMode(str, Enum):
+    auto = "auto"
+    planar = "planar"
+    curved = "curved"
+
+
+class TextCustomization(BaseModel):
+    """User-authored text / badge to bake into the Studio project."""
+
+    enabled: bool = False
+    content: str = ""
+    style: TextStyle = TextStyle.flush
+    surface_mode: TextSurfaceMode = TextSurfaceMode.auto
+    height_mm: float = 0.6
+    inlay_depth_mm: float = 0.8
+    size_mm: Optional[float] = None
+    filament_id: Optional[int] = None
+    extruder: Optional[int] = None
+    color_hex: Optional[str] = None
 
 
 class ColorSlotMapping(BaseModel):
@@ -142,6 +185,8 @@ class RecommendRequest(BaseModel):
     notes: Optional[str] = None
     color_filament_map: list[ColorSlotMapping] = Field(default_factory=list)
     acknowledge_filament_warnings: bool = False
+    apply_fuzzy_skin: bool = False
+    text: Optional[TextCustomization] = None
 
 
 class FilamentMapValidateRequest(BaseModel):
@@ -191,7 +236,58 @@ class PrintRecommendation(BaseModel):
     slicer_hints: dict[str, Any] = Field(default_factory=dict)
     filament_slots: list[FilamentSlotPlan] = Field(default_factory=list)
     filament_warnings: list[FilamentWarning] = Field(default_factory=list)
+    hull_line_risk: bool = False
+    hull_line_mitigation: bool = False
+    hull_line_explanation: str = ""
+    fuzzy_skin_recommended: bool = False
+    fine_text_detected: bool = False
+    fine_detail_optimization: bool = False
+    fine_text_explanation: str = ""
+    wall_generator: Optional[str] = None
+    line_width_mm: Optional[float] = None
+    outer_wall_line_width_mm: Optional[float] = None
+    is_miniature: bool = False
+    miniature_optimization: bool = False
+    miniature_explanation: str = ""
+    brim_type: Optional[str] = None
+    brim_width_mm: Optional[int] = None
+    text_applied: bool = False
+    text_style: Optional[str] = None
+    text_surface_mode: Optional[str] = None
+    text_wrap_applied: bool = False
+    text_content: str = ""
+    text_extruder: Optional[int] = None
+    text_letter_height_mm: Optional[float] = None
+    text_explanation: str = ""
     schema_version: str = "1.0"
+
+
+class TextPreviewRequest(BaseModel):
+    file_id: str
+    text: TextCustomization
+
+
+class TextPreviewResponse(BaseModel):
+    enabled: bool = False
+    surface_kind: str = "planar"
+    wrap_applied: bool = False
+    wrap_recommended: bool = False
+    style: str = "flush"
+    surface_mode: str = "auto"
+    letter_height_mm: float = 0.0
+    height_mm: float = 0.6
+    inlay_depth_mm: float = 0.8
+    extruder: int = 2
+    color_hex: str = "#1C1C1CFF"
+    subtype: str = "modifier_part"
+    explanations: dict[str, str] = Field(default_factory=dict)
+    surface_note: str = ""
+    host_bounds_min: list[float] = Field(default_factory=list)
+    host_bounds_max: list[float] = Field(default_factory=list)
+    vertices: list[list[float]] = Field(default_factory=list)
+    faces: list[list[int]] = Field(default_factory=list)
+    triangle_count: int = 0
+    vertex_count: int = 0
 
 
 class RecommendResponse(BaseModel):

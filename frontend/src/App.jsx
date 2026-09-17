@@ -7,11 +7,13 @@ import {
   exportProfile,
   filamentOptionLabel,
   listFilaments,
+  previewText,
   recommend,
   validateFilamentMap,
 } from './api'
 import ColorSlotMap from './ColorSlotMap'
 import ModelPreviewCard from './ModelPreviewCard'
+import TextCustomizePanel from './TextCustomizePanel'
 import WarningModal from './WarningModal'
 import './App.css'
 
@@ -61,12 +63,17 @@ const SUPPORT_TYPE_LABELS = {
   none: 'Kapalı',
 }
 
-function RecItem({ label, value, reason }) {
+function RecItem({ label, value, reason, whyLabel }) {
   return (
     <div className="rec-item">
       <span>{label}</span>
       <b>{value}</b>
-      {reason ? <p className="rec-why">{reason}</p> : null}
+      {reason ? (
+        <p className="rec-why">
+          {whyLabel ? <em>{whyLabel} </em> : null}
+          {reason}
+        </p>
+      ) : null}
     </div>
   )
 }
@@ -111,7 +118,16 @@ export default function App() {
   const [mapWarnings, setMapWarnings] = useState([])
   const [pendingChange, setPendingChange] = useState(null)
   const [warningsAcked, setWarningsAcked] = useState(false)
+  const [applyFuzzySkin, setApplyFuzzySkin] = useState(false)
+  const [textEnabled, setTextEnabled] = useState(false)
+  const [textContent, setTextContent] = useState('')
+  const [textStyle, setTextStyle] = useState('flush')
+  const [textSurfaceMode, setTextSurfaceMode] = useState('auto')
+  const [textFilamentId, setTextFilamentId] = useState('')
+  const [textExtruder, setTextExtruder] = useState('')
+  const [textPreview, setTextPreview] = useState(null)
   const fileGen = useRef(0)
+  const textPreviewGen = useRef(0)
 
   const refreshFilaments = useCallback(async () => {
     const rows = await listFilaments()
@@ -140,6 +156,16 @@ export default function App() {
 
   const recommendPayload = useMemo(() => {
     if (!geometry) return null
+    const text = textEnabled
+      ? {
+          enabled: true,
+          content: textContent,
+          style: textStyle,
+          surface_mode: textSurfaceMode,
+          filament_id: textFilamentId ? Number(textFilamentId) : null,
+          extruder: textExtruder ? Number(textExtruder) : null,
+        }
+      : null
     return {
       file_id: geometry.file_id,
       purpose,
@@ -149,6 +175,8 @@ export default function App() {
       notes: notes || null,
       color_filament_map: colorFilamentMap,
       acknowledge_filament_warnings: warningsAcked,
+      apply_fuzzy_skin: applyFuzzySkin,
+      text,
     }
   }, [
     geometry,
@@ -159,6 +187,13 @@ export default function App() {
     notes,
     colorFilamentMap,
     warningsAcked,
+    applyFuzzySkin,
+    textEnabled,
+    textContent,
+    textStyle,
+    textSurfaceMode,
+    textFilamentId,
+    textExtruder,
   ])
 
   async function onFile(file) {
@@ -175,6 +210,14 @@ export default function App() {
     setMapWarnings([])
     setPendingChange(null)
     setWarningsAcked(false)
+    setApplyFuzzySkin(false)
+    setTextEnabled(false)
+    setTextContent('')
+    setTextStyle('flush')
+    setTextSurfaceMode('auto')
+    setTextFilamentId('')
+    setTextExtruder('')
+    setTextPreview(null)
     setSelectedFile(file)
     setPreviewUrl('')
     setPreviewStats(null)
@@ -186,6 +229,7 @@ export default function App() {
       const metrics = await analyzeMesh(file)
       if (token !== fileGen.current) return
       setGeometry(metrics)
+      if (metrics.wrap_recommended) setTextSurfaceMode('curved')
     } catch (e) {
       if (token !== fileGen.current) return
       setError(e.message)
@@ -210,6 +254,36 @@ export default function App() {
     if (!geometry?.colors?.length || !filaments.length) return
     setColorMap((prev) => (Object.keys(prev).length ? prev : autoMapColors(geometry.colors, filaments)))
   }, [geometry?.file_id, filaments])
+
+  useEffect(() => {
+    if (!geometry || !textEnabled || !textContent.trim()) {
+      setTextPreview(null)
+      return undefined
+    }
+    const token = ++textPreviewGen.current
+    const timer = setTimeout(async () => {
+      try {
+        const data = await previewText({
+          file_id: geometry.file_id,
+          text: {
+            enabled: true,
+            content: textContent,
+            style: textStyle,
+            surface_mode: textSurfaceMode,
+            filament_id: textFilamentId ? Number(textFilamentId) : null,
+            extruder: textExtruder ? Number(textExtruder) : null,
+          },
+        })
+        if (token !== textPreviewGen.current) return
+        setTextPreview(data)
+      } catch (e) {
+        if (token !== textPreviewGen.current) return
+        setTextPreview(null)
+        setError(e.message)
+      }
+    }, 420)
+    return () => clearTimeout(timer)
+  }, [geometry?.file_id, textEnabled, textContent, textStyle, textSurfaceMode, textFilamentId, textExtruder])
 
   function mapValidateBody(nextMap = colorMap) {
     return {
@@ -417,6 +491,7 @@ export default function App() {
               onPickFile={onFile}
               onViewportReady={onViewportReady}
               onViewportError={onViewportError}
+              overlay={textEnabled ? textPreview : null}
             />
 
             {geometry ? (
@@ -434,7 +509,10 @@ export default function App() {
                   </div>
                   <div className="metric">
                     <span>Model boyutu</span>
-                    <b>{formatBox(geometry.bounding_box_mm)}</b>
+                    <b>
+                      {formatBox(geometry.bounding_box_mm)}
+                      {geometry.is_miniature ? ' · minyatür' : ''}
+                    </b>
                   </div>
                   <div className="metric">
                     <span>P2S tabla limiti</span>
@@ -488,10 +566,62 @@ export default function App() {
                         : ''}
                     </b>
                   </div>
+                  <div className="metric">
+                    <span>Hull Line</span>
+                    <b>
+                      {geometry.hull_line_risk
+                        ? `Risk · kabuk ${geometry.hull_line_shell_thickness_mm || '—'} mm`
+                        : 'Yok'}
+                    </b>
+                  </div>
+                  <div className="metric">
+                    <span>İnce yazı</span>
+                    <b>
+                      {geometry.fine_text_detected
+                        ? `Var · min ${geometry.fine_stroke_width_mm || '—'} mm`
+                        : 'Yok'}
+                    </b>
+                  </div>
+                  <div className="metric">
+                    <span>Hedef yüzey</span>
+                    <b>
+                      {geometry.wrap_recommended
+                        ? `Kavisli · ${geometry.target_surface_kind || 'wrap'}`
+                        : geometry.target_surface_kind === 'cylindrical'
+                          ? 'Silindirik'
+                          : 'Düzlem'}
+                    </b>
+                  </div>
+                  <div className="metric">
+                    <span>Minyatür</span>
+                    <b>
+                      {geometry.is_miniature
+                        ? `Evet · OBB ${formatBox(geometry.obb_extents_mm || geometry.bounding_box_mm)}`
+                        : 'Hayır'}
+                    </b>
+                  </div>
                 </div>
                 {geometry.support_reason ? (
                   <div className={`banner ${geometry.support_required ? 'warn' : 'ok'}`}>
                     {geometry.support_reason}
+                  </div>
+                ) : null}
+                {geometry.hull_line_risk ? (
+                  <div className="banner warn">
+                    {geometry.hull_line_explanation ||
+                      'Hull Line riski: iç taban ince dış duvara bağlanıyor.'}
+                  </div>
+                ) : null}
+                {geometry.fine_text_detected ? (
+                  <div className="banner warn">
+                    {geometry.fine_text_explanation ||
+                      'İnce yazı / mikro detay tespit edildi.'}
+                  </div>
+                ) : null}
+                {geometry.is_miniature ? (
+                  <div className="banner warn">
+                    {geometry.miniature_explanation ||
+                      'Minyatür Model Optimizasyonu Devrede: Model boyutu küçük olduğu için katman 0.12 mm\'ye, dış duvar genişliği 0.35 mm\'ye ve hızı 35 mm/s\'ye çekildi; alt yüzey tahribatını önlemek için destekler kapatıldı ve tabladan kalkmayı önlemek için 7 mm iç/dış kenar (brim) eklendi.'}
                   </div>
                 ) : null}
                 {geometry.detail_note ? <p className="hint">{geometry.detail_note}</p> : null}
@@ -595,6 +725,29 @@ export default function App() {
             </div>
           </div>
 
+          {geometry ? (
+            <TextCustomizePanel
+              enabled={textEnabled}
+              content={textContent}
+              style={textStyle}
+              surfaceMode={textSurfaceMode}
+              filamentId={textFilamentId}
+              extruder={textExtruder}
+              filaments={filaments}
+              wrapRecommended={Boolean(geometry.wrap_recommended)}
+              surfaceNote={geometry.target_surface_note}
+              preview={textPreview}
+              onChange={(patch) => {
+                if (patch.enabled != null) setTextEnabled(patch.enabled)
+                if (patch.content != null) setTextContent(patch.content)
+                if (patch.style != null) setTextStyle(patch.style)
+                if (patch.surfaceMode != null) setTextSurfaceMode(patch.surfaceMode)
+                if (patch.filamentId != null) setTextFilamentId(patch.filamentId)
+                if (patch.extruder != null) setTextExtruder(patch.extruder)
+              }}
+            />
+          ) : null}
+
           {rec ? (
             <div className="panel stack">
               <h2>3. Öneri</h2>
@@ -641,6 +794,74 @@ export default function App() {
                 </div>
               ) : null}
 
+              {(rec.hull_line_risk || rec.fine_text_detected || rec.is_miniature || rec.text_applied) && (
+                <div className="rule-cards">
+                  {rec.text_applied ? (
+                    <div className="rule-card">
+                      <div className="rule-card-head">
+                        <strong>
+                          {rec.text_style === 'embossed' ? 'Kabartmalı yazı' : 'Pürüzsüz / gömülü yazı'}
+                        </strong>
+                        <span className="rule-pill">
+                          {rec.text_wrap_applied ? 'Çevreleyen yüzey' : rec.text_style === 'embossed' ? 'Part' : 'Modifier'}
+                        </span>
+                      </div>
+                      <p className="rec-why">
+                        <em>Neden bu ayar yapıldı?</em> {rec.text_explanation}
+                      </p>
+                    </div>
+                  ) : null}
+                  {rec.is_miniature ? (
+                    <div className="rule-card">
+                      <div className="rule-card-head">
+                        <strong>Minyatür model</strong>
+                        <span className="rule-pill">0.12 mm · brim</span>
+                      </div>
+                      <p className="rec-why">
+                        <em>Neden bu ayar yapıldı?</em>{' '}
+                        {rec.miniature_explanation || rec.setting_reasons?.miniature}
+                      </p>
+                    </div>
+                  ) : null}
+                  {rec.hull_line_risk ? (
+                    <div className="rule-card">
+                      <div className="rule-card-head">
+                        <strong>Hull Line (Gövde Çizgisi)</strong>
+                        <span className="rule-pill">
+                          {rec.hull_line_mitigation ? 'Duvar pekiştirildi' : 'Risk'}
+                        </span>
+                      </div>
+                      <p className="rec-why">
+                        <em>Neden bu ayar yapıldı?</em>{' '}
+                        {rec.hull_line_explanation || rec.setting_reasons?.hull_line}
+                      </p>
+                      {rec.fuzzy_skin_recommended ? (
+                        <label className="rule-toggle">
+                          <input
+                            type="checkbox"
+                            checked={applyFuzzySkin}
+                            onChange={(e) => setApplyFuzzySkin(e.target.checked)}
+                          />
+                          Fuzzy Skin (contour) ile kamufle et — yeniden öner
+                        </label>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {rec.fine_text_detected ? (
+                    <div className="rule-card">
+                      <div className="rule-card-head">
+                        <strong>İnce yazı / mikro detay</strong>
+                        <span className="rule-pill">Arachne</span>
+                      </div>
+                      <p className="rec-why">
+                        <em>Neden bu ayar yapıldı?</em>{' '}
+                        {rec.fine_text_explanation || rec.setting_reasons?.fine_text}
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+
               <div className="rec-grid">
                 <RecItem label="Malzeme" value={rec.material} reason={rec.setting_reasons?.material} />
                 <RecItem
@@ -652,8 +873,45 @@ export default function App() {
                   label="Katman"
                   value={`${rec.layer_height_mm} mm`}
                   reason={rec.setting_reasons?.layer_height}
+                  whyLabel={rec.is_miniature ? 'Neden bu ayar yapıldı?' : undefined}
                 />
                 <RecItem label="Duvar" value={rec.wall_loops} reason={rec.setting_reasons?.walls} />
+                <RecItem
+                  label="Duvar motoru"
+                  value={rec.wall_generator === 'arachne' || rec.fine_detail_optimization ? 'Arachne' : 'Classic'}
+                  reason={rec.setting_reasons?.wall_generator}
+                  whyLabel="Neden bu ayar yapıldı?"
+                />
+                <RecItem
+                  label="Dış duvar hattı"
+                  value={
+                    rec.outer_wall_line_width_mm != null
+                      ? `${rec.outer_wall_line_width_mm} mm`
+                      : rec.line_width_mm != null
+                        ? `${rec.line_width_mm} mm`
+                        : 'varsayılan'
+                  }
+                  reason={rec.setting_reasons?.outer_wall_line_width}
+                  whyLabel={rec.is_miniature || rec.fine_detail_optimization ? 'Neden bu ayar yapıldı?' : undefined}
+                />
+                <RecItem
+                  label="Hull Line"
+                  value={rec.hull_line_risk ? 'risk · duvar artırıldı' : 'yok'}
+                  reason={rec.setting_reasons?.hull_line}
+                  whyLabel={rec.hull_line_risk ? 'Neden bu ayar yapıldı?' : undefined}
+                />
+                <RecItem
+                  label="Fuzzy Skin"
+                  value={
+                    rec.slicer_hints?.fuzzy_skin && rec.slicer_hints.fuzzy_skin !== 'none'
+                      ? `açık (${rec.slicer_hints.fuzzy_skin})`
+                      : rec.fuzzy_skin_recommended
+                        ? 'önerildi'
+                        : 'kapalı'
+                  }
+                  reason={rec.setting_reasons?.fuzzy_skin}
+                  whyLabel={rec.fuzzy_skin_recommended ? 'Neden bu ayar yapıldı?' : undefined}
+                />
                 <RecItem
                   label="Dolgu"
                   value={`%${rec.infill_percent} ${rec.infill_pattern}`}
@@ -675,6 +933,7 @@ export default function App() {
                     rec.outer_wall_speed_mm_s != null ? `${rec.outer_wall_speed_mm_s} mm/s` : '—'
                   }
                   reason={rec.setting_reasons?.outer_wall_speed}
+                  whyLabel={rec.is_miniature ? 'Neden bu ayar yapıldı?' : undefined}
                 />
                 <RecItem
                   label="Dolgu hızı"
@@ -693,11 +952,19 @@ export default function App() {
                       : 'Kapalı'
                   }
                   reason={rec.setting_reasons?.supports || rec.support_reason}
+                  whyLabel={rec.is_miniature ? 'Neden bu ayar yapıldı?' : undefined}
                 />
                 <RecItem
                   label="Brim"
-                  value={rec.brim ? 'evet' : 'hayır'}
+                  value={
+                    rec.brim
+                      ? rec.is_miniature || rec.brim_type === 'outer_and_inner'
+                        ? `${rec.brim_width_mm || rec.slicer_hints?.brim_width || 7} mm iç/dış kenar`
+                        : 'evet'
+                      : 'hayır'
+                  }
                   reason={rec.setting_reasons?.brim}
+                  whyLabel={rec.is_miniature ? 'Neden bu ayar yapıldı?' : undefined}
                 />
               </div>
               <p className="rationale">{rec.rationale}</p>

@@ -27,10 +27,29 @@ def recommendation_to_cli_overlay(rec: PrintRecommendation) -> dict[str, Any]:
             rec.support_type or ("tree(auto)" if rec.supports else "normal(auto)"),
         ),
         "brim_width": hints.get("brim_width", 5 if rec.brim else 0),
+        "brim_type": hints.get(
+            "brim_type",
+            rec.brim_type or ("outer_only" if rec.brim else "no_brim"),
+        ),
         "outer_wall_speed": hints.get("outer_wall_speed", rec.outer_wall_speed_mm_s),
         "sparse_infill_speed": hints.get("sparse_infill_speed", rec.sparse_infill_speed_mm_s),
         "print_speed": hints.get("print_speed", rec.print_speed_mm_s),
     }
+    if rec.wall_generator or hints.get("wall_generator"):
+        process_overlay["wall_generator"] = hints.get("wall_generator", rec.wall_generator)
+    line_w = hints.get("line_width", rec.line_width_mm)
+    if line_w is not None:
+        process_overlay["line_width"] = line_w
+        process_overlay["outer_wall_line_width"] = hints.get("outer_wall_line_width", line_w)
+        process_overlay["initial_layer_line_width"] = hints.get(
+            "initial_layer_line_width", line_w
+        )
+    outer_w = hints.get("outer_wall_line_width", rec.outer_wall_line_width_mm)
+    if outer_w is not None:
+        process_overlay["outer_wall_line_width"] = outer_w
+    for key in ("fuzzy_skin", "fuzzy_skin_point_distance", "fuzzy_skin_thickness"):
+        if hints.get(key) is not None:
+            process_overlay[key] = hints[key]
     filament_overlay = {
         "filament_type": hints.get("filament_type", rec.material),
         "nozzle_temperature": hints.get("nozzle_temperature", rec.nozzle_temp_c),

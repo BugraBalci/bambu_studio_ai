@@ -24,6 +24,22 @@ LARGE_FLAT_BOTTOM_MM2 = 5000.0
 HIGH_VERTEX_DENSITY = 8.0  # vertices per mm² of surface
 HIGH_NORMAL_VARIANCE = 0.35  # mean adjacent normal disagreement (1 - |n_i·n_j|)
 
+# Hull Line: internal floor meeting an outer shell thinner than this
+HULL_LINE_THICKNESS_LIMIT_MM = 2.0
+# Fine text / micro-detail: stroke width below a classic 0.42 mm line
+FINE_STROKE_LIMIT_MM = 0.45
+
+# Micro / miniature prints: longest oriented-bbox side, plus a volume fallback
+# so a slightly elongated figurine still counts as miniature.
+MINIATURE_MAX_EXTENT_MM = 35.0
+MINIATURE_BBOX_VOLUME_MM3 = MINIATURE_MAX_EXTENT_MM ** 3  # 35³ ≈ 42875 mm³
+MINIATURE_VOLUME_MAX_EXTENT_MM = 38.0
+MINIATURE_LAYER_HEIGHT_MM = 0.12
+MINIATURE_OUTER_WALL_LINE_WIDTH_MM = 0.35
+MINIATURE_OUTER_WALL_SPEED_MM_S = 35
+MINIATURE_BRIM_WIDTH_MM = 7
+MINIATURE_BRIM_TYPE = "outer_and_inner"
+
 # Center-of-mass / tip-over stability
 COG_Z_TOP_HEAVY = 0.68  # CoG above this fraction of height → top-heavy
 COG_XY_SKEW = 0.28  # CoG XY offset / half-width → lateral imbalance

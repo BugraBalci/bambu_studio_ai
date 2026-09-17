@@ -26,6 +26,15 @@ from slicer_pipeline.studio_profile import first_scalar, object_metadata_from_se
 LOGGER = logging.getLogger("auto_slicer")
 
 _IDENTITY_16 = "1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"
+_PART_SUBTYPES = frozenset(
+    {
+        "normal_part",
+        "modifier_part",
+        "negative_part",
+        "support_enforcer",
+        "support_blocker",
+    }
+)
 
 # Entries Bambu Studio requires before it treats the archive as a project rather
 # than loose geometry, in the order it walks the zip. `model_settings.config` has
@@ -152,6 +161,7 @@ class ProjectPackager:
                     "extruder": p.extruder,
                     "color": p.color_hex,
                     "triangles": p.face_count,
+                    "subtype": getattr(p, "subtype", "normal_part") or "normal_part",
                 }
                 for p in working.parts
             ],
@@ -202,6 +212,8 @@ class ProjectPackager:
                     paint_color=list(p.paint_color) if p.paint_color else None,
                     material_pid=p.material_pid,
                     material_pindex=p.material_pindex,
+                    subtype=getattr(p, "subtype", "normal_part") or "normal_part",
+                    lock_extruder=bool(getattr(p, "lock_extruder", False)),
                 )
                 for p in assembly.parts
                 if p.face_count > 0
@@ -257,8 +269,9 @@ class ProjectPackager:
                 f"{_mesh_xml(part, material_id)}\n"
                 "    </object>"
             )
+            subtype = part.subtype if part.subtype in _PART_SUBTYPES else "normal_part"
             part_settings.append(
-                f'    <part id="{part_index}" subtype="normal_part">\n'
+                f'    <part id="{part_index}" subtype="{_a(subtype)}">\n'
                 f'      <metadata key="name" value="{_a(part.name)}"/>\n'
                 f'      <metadata key="matrix" value="{_IDENTITY_16}"/>\n'
                 f'      <metadata key="extruder" value="{part.extruder}"/>\n'

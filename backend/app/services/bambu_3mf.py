@@ -35,6 +35,7 @@ from slicer_pipeline.studio_profile import (  # noqa: E402
     printer_settings_id_for,
     retarget_to_p2s,
 )
+from slicer_pipeline.text_engine import TextSpec  # noqa: E402
 
 TEMPLATE_PATH = ROOT_DIR / "profiles" / "bambu_project_settings_template.json"
 
@@ -140,12 +141,16 @@ def recommendation_to_project_overrides(rec: PrintRecommendation) -> dict[str, A
         180,
     )
     supports = optional_hint(hints, "enable_support", rec.supports)
-    brim_hint = optional_hint(hints, "brim_type", None)
+    brim_hint = optional_hint(hints, "brim_type", rec.brim_type)
     if brim_hint is None:
         brim_type = "outer_only" if rec.brim else "no_brim"
     else:
         brim_type = str(brim_hint)
-    brim_width = optional_hint(hints, "brim_width", 5 if rec.brim else 0)
+    brim_width = optional_hint(
+        hints,
+        "brim_width",
+        rec.brim_width_mm if rec.brim_width_mm is not None else (5 if rec.brim else 0),
+    )
     support_type = optional_hint(
         hints,
         "support_type",
@@ -193,6 +198,25 @@ def recommendation_to_project_overrides(rec: PrintRecommendation) -> dict[str, A
         "print_sequence": "by layer",
     }
     overrides.update(_filament_arrays(rec, hints))
+    for key in (
+        "wall_generator",
+        "line_width",
+        "outer_wall_line_width",
+        "initial_layer_line_width",
+        "fuzzy_skin",
+        "fuzzy_skin_point_distance",
+        "fuzzy_skin_thickness",
+    ):
+        value = optional_hint(hints, key, None)
+        if value is None and key == "wall_generator":
+            value = rec.wall_generator
+        if value is None and key == "line_width" and rec.line_width_mm is not None:
+            value = rec.line_width_mm
+        if value is None and key == "outer_wall_line_width":
+            value = rec.outer_wall_line_width_mm if rec.outer_wall_line_width_mm is not None else rec.line_width_mm
+        if value is None:
+            continue
+        overrides[key] = str(first_scalar(value))
     return overrides
 
 
@@ -205,16 +229,45 @@ def write_bambu_3mf_bytes(
     model_path: Path,
     rec: PrintRecommendation,
     part_name: str = "model",
+    text_spec: TextSpec | None = None,
+    inventory: list[dict[str, Any]] | None = None,
 ) -> bytes:
+    from app.services.text_custom import apply_text_volume, attach_text_to_recommendation
+
     assembly = MeshParser().parse(model_path)
+    sidecar: dict[str, Any] = {
+        "recommendation": rec.model_dump(),
+        "printer": "Bambu Lab P2S Combo",
+    }
+    if text_spec is not None and text_spec.enabled:
+        result = apply_text_volume(assembly, text_spec)
+        row = None
+        if inventory and result.spec.filament_id is not None:
+            row = next(
+                (item for item in inventory if int(item.get("id") or 0) == int(result.spec.filament_id)),
+                None,
+            )
+        rec = attach_text_to_recommendation(
+            rec,
+            result.spec,
+            wrap_applied=result.wrap_applied,
+            letter_height_mm=result.letter_height_mm,
+            inventory_row=row,
+        )
+        sidecar["text"] = {
+            "content": result.spec.content,
+            "style": result.spec.style,
+            "subtype": result.spec.subtype,
+            "wrap_applied": result.wrap_applied,
+            "surface": result.surface.as_dict(),
+            "extruder": result.spec.extruder,
+            "letter_height_mm": result.letter_height_mm,
+        }
+        sidecar["recommendation"] = rec.model_dump()
     settings = build_project_settings(rec)
     engine = BambuConfigEngine()
     slot_profiles = [slot.model_dump() for slot in rec.filament_slots] if rec.filament_slots else None
     settings = engine.expand_filaments(settings, assembly.materials, slot_profiles=slot_profiles)
-    sidecar = {
-        "recommendation": rec.model_dump(),
-        "printer": "Bambu Lab P2S Combo",
-    }
     return ProjectPackager().pack_bytes(
         assembly,
         settings,

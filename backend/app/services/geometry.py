@@ -6,6 +6,7 @@ loads the assembly without flattening; analysis runs on the combined mesh.
 
 from __future__ import annotations
 
+import logging
 import sys
 import uuid
 from collections import Counter
@@ -21,7 +22,17 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from slicer_pipeline.constants import SUPPORTED_MESH_SUFFIXES  # noqa: E402
+from slicer_pipeline.defects import (  # noqa: E402
+    FINE_TEXT_EXPLANATION_TR,
+    HULL_LINE_EXPLANATION_TR,
+    miniature_brim_width_mm,
+    miniature_explanation_tr,
+)
+from slicer_pipeline.geometry import GeometryAnalyzer  # noqa: E402
 from slicer_pipeline.mesh_parser import MeshParser  # noqa: E402
+from slicer_pipeline.text_engine import analyze_target_surface  # noqa: E402
+
+LOGGER = logging.getLogger(__name__)
 
 # triangles per cm² of surface — heuristic mesh density bands
 DETAIL_LOW_MAX = 80.0
@@ -71,21 +82,13 @@ def _detail_tier(triangles_per_cm2: float, thin: bool) -> tuple[DetailTier, str]
 
 def analyze_mesh(path: Path, original_filename: str, file_id: str | None = None) -> GeometryMetrics:
     assembly = MeshParser().parse(path)
-    mesh = assembly.combined_mesh()
+    analyzer = GeometryAnalyzer(assembly)
+    full = analyzer.analyze()
+    mesh = analyzer.mesh
+    assert mesh is not None
 
-    extents = mesh.extents.astype(float)
-    volume = float(mesh.volume) if mesh.is_volume else float(abs(mesh.volume))
-    if assembly.parts and len(assembly.parts) > 1:
-        part_vol = 0.0
-        for part in assembly.parts:
-            m = part.world_mesh()
-            try:
-                part_vol += float(abs(m.volume)) if m.is_watertight else float(abs(m.convex_hull.volume))
-            except Exception:  # noqa: BLE001
-                continue
-        if part_vol > 0:
-            volume = part_vol
-    volume_cm3 = abs(volume) / 1000.0
+    extents = np.asarray(full.extents_mm, dtype=float)
+    volume_cm3 = abs(full.volume_cm3)
     surface_cm2 = float(mesh.area) / 100.0
 
     sorted_ext = sorted(extents.tolist())
@@ -93,16 +96,25 @@ def analyze_mesh(path: Path, original_filename: str, file_id: str | None = None)
 
     min_dim = float(sorted_ext[0])
     thin = min_dim < 2.0 or (aspect > 8 and min_dim < 4.0)
+    if full.hull_line_risk and full.hull_line_shell_thickness_mm < 2.0:
+        thin = True
     thin_note = ""
     if thin:
         thin_note = (
             f"En ince boyut ~{min_dim:.1f} mm; ince duvarlar için 0.4 mm nozzle "
             "veya daha fazla duvar önerilir."
         )
+    if full.hull_line_risk:
+        thin_note = (
+            f"{thin_note} " if thin_note else ""
+        ) + (
+            f"Hull Line: iç taban-duvar birleşiminde kabuk "
+            f"~{full.hull_line_shell_thickness_mm:.1f} mm."
+        ).strip()
 
     from slicer_pipeline.support import analyze_overhang_support
 
-    support = analyze_overhang_support(mesh)
+    support = analyzer._support_analysis or analyze_overhang_support(mesh)
     overhang_risk = support.support_required
     overhang_note = support.overhang_note
 
@@ -133,6 +145,19 @@ def analyze_mesh(path: Path, original_filename: str, file_id: str | None = None)
             f" {len(assembly.parts)} gövde / {len(colors)} renk korundu."
         )
 
+    try:
+        surface = analyze_target_surface(mesh)
+        surface_kind = surface.kind
+        wrap_recommended = bool(surface.wrap_recommended)
+        surface_note = surface.note
+        cylinder_radius = float(surface.cylinder_radius)
+    except Exception as exc:  # noqa: BLE001
+        surface_kind = "planar"
+        wrap_recommended = False
+        surface_note = ""
+        cylinder_radius = 0.0
+        LOGGER.debug("Surface classification skipped: %s", exc)
+
     return GeometryMetrics(
         filename=original_filename,
         file_id=file_id or uuid.uuid4().hex,
@@ -160,4 +185,25 @@ def analyze_mesh(path: Path, original_filename: str, file_id: str | None = None)
         part_count=len(assembly.parts),
         color_count=max(len(colors), 1),
         colors=colors,
+        hull_line_risk=bool(full.hull_line_risk),
+        hull_line_shell_thickness_mm=round(full.hull_line_shell_thickness_mm, 3),
+        hull_line_z_mm=[round(z, 2) for z in full.hull_line_z_mm],
+        hull_line_note=full.hull_line_note,
+        hull_line_explanation=HULL_LINE_EXPLANATION_TR if full.hull_line_risk else "",
+        fine_text_detected=bool(full.fine_text_detected),
+        fine_stroke_width_mm=round(full.fine_stroke_width_mm, 3),
+        fine_text_on_skin=bool(full.fine_text_on_skin),
+        fine_text_note=full.fine_text_note,
+        fine_text_explanation=FINE_TEXT_EXPLANATION_TR if full.fine_text_detected else "",
+        is_miniature=bool(full.is_miniature),
+        obb_extents_mm=[round(float(x), 2) for x in full.obb_extents_mm],
+        miniature_explanation=(
+            miniature_explanation_tr(miniature_brim_width_mm(extents))
+            if full.is_miniature
+            else ""
+        ),
+        target_surface_kind=surface_kind,
+        wrap_recommended=wrap_recommended,
+        target_surface_note=surface_note,
+        cylinder_radius_mm=round(cylinder_radius, 2),
     )

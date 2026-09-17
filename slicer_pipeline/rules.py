@@ -6,17 +6,31 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+
 from slicer_pipeline.constants import (
     COG_XY_SKEW,
     COG_Z_TOP_HEAVY,
     HIGH_NORMAL_VARIANCE,
     HIGH_VERTEX_DENSITY,
     HOLE_COMPENSATION_MM,
+    HULL_LINE_THICKNESS_LIMIT_MM,
     LARGE_FLAT_BOTTOM_MM2,
     LARGE_VOLUME_CM3,
     NARROW_TOP_AREA_MM2,
     OVERHANG_AREA_RATIO,
     TALL_ASPECT_RATIO,
+)
+from slicer_pipeline.defects import (
+    DEFAULT_LINE_WIDTH_MM,
+    FINE_TEXT_EXPLANATION_TR,
+    FINE_TEXT_LINE_WIDTH_MM,
+    FUZZY_SKIN_RECOMMENDED,
+    HULL_LINE_EXPLANATION_TR,
+    MINIATURE_OUTER_WALL_LINE_WIDTH_MM,
+    fine_text_profile_updates,
+    hull_line_profile_updates,
+    miniature_profile_updates,
 )
 from slicer_pipeline.geometry import GeometryMetrics
 
@@ -42,7 +56,12 @@ class RuleEngine:
             self.rule_dense_detail(metrics),
             self.rule_stability(metrics),
             self.rule_hole_tolerance(metrics),
+            self.rule_hull_line(metrics),
+            self.rule_fine_text(metrics),
+            self.rule_miniature(metrics),
         ]
+        self._reconcile_wall_thickness(results)
+        self._reconcile_miniature(results)
         for r in results:
             level = logging.INFO if r.triggered else logging.DEBUG
             LOGGER.log(level, "%s", r.reason)
@@ -184,3 +203,114 @@ class RuleEngine:
             reason += " -> Hole Tolerance Rule skipped"
             updates = {}
         return RuleResult("hole_tolerance", triggered, reason, updates)
+
+    def rule_hull_line(self, m: GeometryMetrics) -> RuleResult:
+        triggered = bool(m.hull_line_risk)
+        thickness = m.hull_line_shell_thickness_mm
+        reason = (
+            f"Hull line: risk={triggered}, shell={thickness:.2f} mm "
+            f"(limit <{HULL_LINE_THICKNESS_LIMIT_MM:.1f} mm), "
+            f"floor={m.hull_line_floor_area_mm2:.0f} mm²"
+        )
+        if m.hull_line_note:
+            reason += f" | {m.hull_line_note}"
+        if triggered:
+            reason += " -> Triggering Hull Line Mitigation (wall reinforcement; fuzzy skin recommended)"
+            updates = hull_line_profile_updates(DEFAULT_LINE_WIDTH_MM, apply_fuzzy_skin=False)
+            updates["_fuzzy_skin_recommended"] = dict(FUZZY_SKIN_RECOMMENDED)
+            updates["_explanation_tr"] = HULL_LINE_EXPLANATION_TR
+        else:
+            reason += " -> Hull Line Rule skipped"
+            updates = {}
+        return RuleResult("hull_line", triggered, reason, updates)
+
+    def rule_fine_text(self, m: GeometryMetrics) -> RuleResult:
+        triggered = bool(m.fine_text_detected)
+        reason = (
+            f"Fine text: detected={triggered}, min stroke={m.fine_stroke_width_mm:.2f} mm, "
+            f"on skin={m.fine_text_on_skin}"
+        )
+        if m.fine_text_note:
+            reason += f" | {m.fine_text_note}"
+        if triggered:
+            reason += " -> Triggering Fine Text / Arachne Rule"
+            updates = fine_text_profile_updates(on_first_or_top_layer=True)
+            updates["_explanation_tr"] = FINE_TEXT_EXPLANATION_TR
+        else:
+            reason += " -> Fine Text Rule skipped"
+            updates = {}
+        return RuleResult("fine_text", triggered, reason, updates)
+
+    def rule_miniature(self, m: GeometryMetrics) -> RuleResult:
+        obb_raw = getattr(m, "obb_extents_mm", None)
+        obb = np.asarray(obb_raw, dtype=np.float64) if obb_raw is not None else np.zeros(0)
+        extents = (
+            obb
+            if obb.size == 3 and np.any(obb)
+            else np.asarray(m.extents_mm, dtype=np.float64)
+        )
+        triggered = bool(getattr(m, "is_miniature", False))
+        longest = float(np.max(extents)) if extents.size else 0.0
+        volume = float(np.prod(extents)) if extents.size else 0.0
+        dx, dy, dz = (float(extents[i]) if extents.size > i else 0.0 for i in range(3))
+        reason = (
+            f"Miniature: is_miniature={triggered}, OBB="
+            f"{dx:.1f}×{dy:.1f}×{dz:.1f} mm "
+            f"(longest={longest:.1f} mm, volume={volume:.0f} mm³)"
+        )
+        if triggered:
+            reason += " -> Triggering Micro / Miniature Print Rule"
+            updates = miniature_profile_updates(m.extents_mm)
+        else:
+            reason += " -> Miniature Rule skipped"
+            updates = {}
+        return RuleResult("miniature", triggered, reason, updates)
+
+    @staticmethod
+    def _reconcile_wall_thickness(results: list[RuleResult]) -> None:
+        """If Arachne/miniature drops line width, recompute hull-line wall_loops so the shell stays > 2 mm."""
+        hull = next((r for r in results if r.name == "hull_line"), None)
+        if hull is None or not hull.triggered:
+            return
+        line_w = DEFAULT_LINE_WIDTH_MM
+        candidates: list[float] = []
+        for name, key, fallback in (
+            ("fine_text", "line_width", FINE_TEXT_LINE_WIDTH_MM),
+            ("miniature", "outer_wall_line_width", MINIATURE_OUTER_WALL_LINE_WIDTH_MM),
+        ):
+            rule = next((r for r in results if r.name == name), None)
+            if rule is None or not rule.triggered:
+                continue
+            try:
+                candidates.append(float(rule.updates.get(key, fallback)))
+            except (TypeError, ValueError):
+                candidates.append(fallback)
+        if candidates:
+            line_w = min(candidates)
+        hull.updates.update(hull_line_profile_updates(line_w, apply_fuzzy_skin=False))
+        hull.updates["_fuzzy_skin_recommended"] = dict(FUZZY_SKIN_RECOMMENDED)
+        hull.updates["_explanation_tr"] = HULL_LINE_EXPLANATION_TR
+
+    @staticmethod
+    def _reconcile_miniature(results: list[RuleResult]) -> None:
+        """Miniature wins on supports/brim/speed; keep the finer outer-wall width if text also fired."""
+        mini = next((r for r in results if r.name == "miniature"), None)
+        if mini is None or not mini.triggered:
+            return
+        for rule in results:
+            if rule is mini or not rule.triggered:
+                continue
+            rule.updates["enable_support"] = "0"
+            rule.updates.pop("support_type", None)
+        fine = next((r for r in results if r.name == "fine_text"), None)
+        if fine is not None and fine.triggered:
+            try:
+                fine_w = float(fine.updates.get("outer_wall_line_width", FINE_TEXT_LINE_WIDTH_MM))
+                mini_w = float(
+                    mini.updates.get("outer_wall_line_width", MINIATURE_OUTER_WALL_LINE_WIDTH_MM)
+                )
+            except (TypeError, ValueError):
+                return
+            if fine_w < mini_w:
+                width = fine.updates.get("outer_wall_line_width", f"{fine_w:.1f}")
+                mini.updates["outer_wall_line_width"] = width

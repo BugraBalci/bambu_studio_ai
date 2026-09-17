@@ -27,6 +27,8 @@ from app.schemas import (
     GeometryMetrics,
     RecommendRequest,
     RecommendResponse,
+    TextPreviewRequest,
+    TextPreviewResponse,
 )
 from app.services.bambu_3mf import write_bambu_3mf_bytes
 from app.services.filament_compat import plan_filament_slots, validate_filament_slots
@@ -34,6 +36,7 @@ from app.services.geometry import SUPPORTED_MESH_SUFFIXES, analyze_mesh, extract
 from app.services.phase_b import recommendation_to_cli_overlay
 from app.services.recommend import recommend, source_meta
 from app.services.rules import baseline_for
+from app.services.text_custom import preview_text_on_model, resolve_text_spec
 
 settings = get_settings()
 UPLOAD_ROOT = Path(settings.upload_dir)
@@ -126,6 +129,8 @@ def _run_recommend(payload: RecommendRequest, db: Session):
         notes=payload.notes,
         preferred_filament_id=payload.preferred_filament_id,
         color_filament_map=payload.color_filament_map,
+        apply_fuzzy_skin=payload.apply_fuzzy_skin,
+        text=payload.text,
     )
     return geometry, recommendation, used_llm, baseline
 
@@ -320,11 +325,15 @@ def export_3mf(payload: RecommendRequest, db: Session = Depends(get_db)) -> Resp
     """Bambu Studio proje .3mf — aç, Slice, bas. (Önceden dilimlenmiş gcode değil.)"""
     geometry, recommendation, _, _ = _run_recommend(payload, db)
     model_path = _model_path_for(payload.file_id)
+    inventory = _filament_inventory(db)
+    text_spec = resolve_text_spec(payload.text, inventory, recommendation.material)
     try:
         data = write_bambu_3mf_bytes(
             model_path,
             recommendation,
             part_name=Path(geometry.filename).stem or "model",
+            text_spec=text_spec,
+            inventory=inventory,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"3MF oluşturulamadı: {exc}") from exc
@@ -335,3 +344,23 @@ def export_3mf(payload: RecommendRequest, db: Session = Depends(get_db)) -> Resp
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+@app.post("/api/text/preview", response_model=TextPreviewResponse)
+def preview_text(payload: TextPreviewRequest, db: Session = Depends(get_db)) -> TextPreviewResponse:
+    geometry = _load_geometry(payload.file_id)
+    model_path = _model_path_for(payload.file_id)
+    spec = resolve_text_spec(payload.text, _filament_inventory(db), "PLA")
+    if spec is None:
+        return TextPreviewResponse(
+            enabled=False,
+            surface_kind=geometry.target_surface_kind or "planar",
+            wrap_recommended=bool(geometry.wrap_recommended),
+            surface_note=geometry.target_surface_note or "",
+            style=(payload.text.style.value if payload.text else "flush"),
+            surface_mode=(payload.text.surface_mode.value if payload.text else "auto"),
+        )
+    try:
+        return preview_text_on_model(model_path, spec)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"Yazı önizlemesi oluşturulamadı: {exc}") from exc

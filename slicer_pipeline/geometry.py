@@ -21,6 +21,7 @@ from slicer_pipeline.constants import (
     HOLE_MIN_CIRCULARITY,
     HOLE_MIN_DIAMETER_MM,
     HOLE_SLICE_FRACTIONS,
+    MINIATURE_MAX_EXTENT_MM,
     NEG_Z,
     OVERHANG_ANGLE_DEG,
     P2S_BED_MM,
@@ -48,7 +49,7 @@ class GeometryMetrics:
     volume_cm3: float
     bbox_min: np.ndarray
     bbox_max: np.ndarray
-    extents_mm: np.ndarray  # [dx, dy, dz]
+    extents_mm: np.ndarray  # AABB [dx, dy, dz]
     aspect_ratio_z: float
     overhang_area_ratio: float
     overhang_area_mm2: float
@@ -73,6 +74,17 @@ class GeometryMetrics:
     support_reason: str = ""
     overhang_cluster_count: int = 0
     planar_overhang_ratio: float = 0.0
+    hull_line_risk: bool = False
+    hull_line_shell_thickness_mm: float = 0.0
+    hull_line_z_mm: list[float] = field(default_factory=list)
+    hull_line_floor_area_mm2: float = 0.0
+    hull_line_note: str = ""
+    fine_text_detected: bool = False
+    fine_stroke_width_mm: float = 0.0
+    fine_text_on_skin: bool = False
+    fine_text_note: str = ""
+    obb_extents_mm: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    is_miniature: bool = False
 
     @property
     def fits_p1s_bed(self) -> bool:
@@ -81,6 +93,11 @@ class GeometryMetrics:
     @property
     def bbox_volume_mm3(self) -> float:
         return float(np.prod(self.extents_mm))
+
+    @property
+    def obb_volume_mm3(self) -> float:
+        extents = self.obb_extents_mm if np.any(self.obb_extents_mm) else self.extents_mm
+        return float(np.prod(extents))
 
 
 class GeometryAnalyzer:
@@ -158,9 +175,13 @@ class GeometryAnalyzer:
         surface_area = float(mesh.area)
         volume = self._volume_mm3(mesh)
         extents = mesh.extents.astype(np.float64)
+        obb_extents = self._oriented_extents_mm(mesh)
         bounds = mesh.bounds.astype(np.float64)
         dx, dy, dz = extents
         aspect = float(dz / max(dx, dy, 1e-9))
+        from slicer_pipeline.defects import is_miniature_extents
+
+        miniature = is_miniature_extents(obb_extents)
 
         overhang_area, overhang_ratio = self._overhang_metrics()
         support = self._support_analysis
@@ -170,6 +191,8 @@ class GeometryAnalyzer:
         normal_var = self._adjacent_normal_variance()
         cog, cog_z_ratio, cog_xy_offset, tip_over = self._center_of_mass_analysis()
         hole_metrics = self._detect_cylindrical_holes()
+        hull_line = self._detect_hull_line()
+        fine_text = self._detect_fine_text(vertex_density, normal_var)
 
         fits = bool(
             max(extents) <= max(P2S_BED_MM) + 0.05
@@ -194,6 +217,8 @@ class GeometryAnalyzer:
             bbox_min=bounds[0],
             bbox_max=bounds[1],
             extents_mm=extents,
+            obb_extents_mm=obb_extents,
+            is_miniature=miniature,
             aspect_ratio_z=aspect,
             overhang_area_ratio=overhang_ratio,
             overhang_area_mm2=overhang_area,
@@ -219,9 +244,41 @@ class GeometryAnalyzer:
             support_reason=support.support_reason if support else "",
             overhang_cluster_count=support.cluster_count if support else 0,
             planar_overhang_ratio=support.planar_area_ratio if support else 0.0,
+            hull_line_risk=hull_line.risk,
+            hull_line_shell_thickness_mm=hull_line.shell_thickness_mm,
+            hull_line_z_mm=hull_line.junction_z_mm,
+            hull_line_floor_area_mm2=hull_line.floor_area_mm2,
+            hull_line_note=hull_line.notes,
+            fine_text_detected=fine_text.detected,
+            fine_stroke_width_mm=fine_text.min_stroke_width_mm,
+            fine_text_on_skin=fine_text.on_first_or_top_layer,
+            fine_text_note=fine_text.notes,
         )
         self._log_metrics(metrics)
         return metrics
+
+    @staticmethod
+    def _oriented_extents_mm(mesh: trimesh.Trimesh) -> np.ndarray:
+        """Side lengths of the oriented bounding box (mm), falling back to AABB."""
+        try:
+            _to_origin, extents = trimesh.bounds.oriented_bounds(mesh)
+            obb = np.asarray(extents, dtype=np.float64).reshape(-1)
+            if obb.size == 3 and np.all(np.isfinite(obb)) and np.all(obb > 1e-9):
+                return obb
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("oriented_bounds failed (%s); trying bounding_box_oriented", exc)
+        try:
+            box = mesh.bounding_box_oriented
+            primitive = getattr(box, "primitive", None)
+            raw = getattr(primitive, "extents", None)
+            if raw is None:
+                raw = getattr(box, "extents", None)
+            obb = np.asarray(raw, dtype=np.float64).reshape(-1)
+            if obb.size == 3 and np.all(np.isfinite(obb)) and np.all(obb > 1e-9):
+                return obb
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("Oriented bbox fallback to AABB: %s", exc)
+        return mesh.extents.astype(np.float64)
 
     def _volume_mm3(self, mesh: trimesh.Trimesh) -> float:
         if self.assembly and len(self.assembly.parts) > 1:
@@ -542,9 +599,26 @@ class GeometryAnalyzer:
                     "area": area,
                     "perimeter": perimeter,
                     "diameter": perimeter / math.pi,
+                    "points": pts2d,
                 }
             )
         return loops
+
+    def _detect_hull_line(self):
+        from slicer_pipeline.defects import detect_hull_line
+
+        assert self.mesh is not None
+        report = detect_hull_line(self.mesh, self._closed_loops_at_z)
+        LOGGER.debug("Hull line: risk=%s %s", report.risk, report.notes)
+        return report
+
+    def _detect_fine_text(self, vertex_density: float, normal_variance: float):
+        from slicer_pipeline.defects import detect_fine_text
+
+        assert self.mesh is not None
+        report = detect_fine_text(self.mesh, vertex_density, normal_variance)
+        LOGGER.debug("Fine text: detected=%s %s", report.detected, report.notes)
+        return report
 
     @staticmethod
     def _polygon_area_2d(pts: np.ndarray) -> float:
@@ -571,11 +645,17 @@ class GeometryAnalyzer:
     @staticmethod
     def _log_metrics(m: GeometryMetrics) -> None:
         LOGGER.info(
-            "BBox extents: %.2f × %.2f × %.2f mm | volume: %.2f cm³ | "
+            "BBox extents: %.2f × %.2f × %.2f mm | OBB: %.2f × %.2f × %.2f mm | "
+            "miniature=%s (max≤%.0f mm) | volume: %.2f cm³ | "
             "area: %.1f mm² | aspect Z: %.2f | parts: %d | colors: %d",
             m.extents_mm[0],
             m.extents_mm[1],
             m.extents_mm[2],
+            m.obb_extents_mm[0],
+            m.obb_extents_mm[1],
+            m.obb_extents_mm[2],
+            m.is_miniature,
+            MINIATURE_MAX_EXTENT_MM,
             m.volume_cm3,
             m.surface_area_mm2,
             m.aspect_ratio_z,
@@ -608,4 +688,11 @@ class GeometryAnalyzer:
             m.tip_over_risk,
             m.mechanical_hole_count,
             [round(d, 2) for d in m.hole_diameters_mm],
+        )
+        LOGGER.info(
+            "Hull line: risk=%s shell=%.2f mm | fine text: %s stroke=%.2f mm",
+            m.hull_line_risk,
+            m.hull_line_shell_thickness_mm,
+            m.fine_text_detected,
+            m.fine_stroke_width_mm,
         )

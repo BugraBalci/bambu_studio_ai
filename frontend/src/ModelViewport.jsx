@@ -1,11 +1,44 @@
 import { useEffect, useRef } from 'react'
-import { frameOrbitCamera, loadAlignedPreviewObject } from './meshPreview'
+import { frameOrbitCamera, loadAlignedPreviewObject, slicerOverlayGeometry } from './meshPreview'
 
 /**
- * Live Three.js print-bed viewport: Z-up correction, orbit / pan / zoom.
+ * Live Three.js print-bed viewport: Z-up correction, orbit / pan / zoom,
+ * optional text-volume overlay from the backend engine.
  */
-export default function ModelViewport({ file, onReady, onError }) {
+export default function ModelViewport({ file, onReady, onError, overlay = null }) {
   const hostRef = useRef(null)
+  const ctxRef = useRef(null)
+  const overlayRef = useRef(overlay)
+  overlayRef.current = overlay
+
+  function applyOverlay(ctx, nextOverlay) {
+    if (!ctx?.THREE || !ctx.scene) return
+    const { THREE, scene } = ctx
+    if (ctx.overlayMesh) {
+      scene.remove(ctx.overlayMesh)
+      ctx.overlayMesh.geometry?.dispose()
+      ctx.overlayMesh.material?.dispose()
+      ctx.overlayMesh = null
+    }
+    if (!nextOverlay?.enabled || !nextOverlay.vertices?.length) return
+    const geometry = slicerOverlayGeometry(THREE, nextOverlay, ctx.hostBox)
+    if (!geometry) return
+    const color = nextOverlay.color_hex || (nextOverlay.style === 'embossed' ? '#e8c547' : '#1c1c1c')
+    const material = new THREE.MeshStandardMaterial({
+      color,
+      metalness: 0.08,
+      roughness: 0.42,
+      transparent: nextOverlay.style === 'flush',
+      opacity: nextOverlay.style === 'flush' ? 0.88 : 1,
+      emissive: nextOverlay.style === 'embossed' ? 0x3a2a10 : 0x000000,
+      emissiveIntensity: nextOverlay.style === 'embossed' ? 0.18 : 0,
+      side: THREE.DoubleSide,
+    })
+    const mesh = new THREE.Mesh(geometry, material)
+    mesh.renderOrder = 2
+    scene.add(mesh)
+    ctx.overlayMesh = mesh
+  }
 
   useEffect(() => {
     if (!file || !hostRef.current) return
@@ -73,6 +106,10 @@ export default function ModelViewport({ file, onReady, onError }) {
         )
         scene.add(grid)
 
+        const hostBox = new THREE.Box3().setFromObject(object)
+        ctxRef.current = { THREE, scene, object, overlayMesh: null, hostBox }
+        applyOverlay(ctxRef.current, overlayRef.current)
+
         const resize = () => {
           if (!host.clientWidth || !host.clientHeight) return
           const w = host.clientWidth
@@ -101,6 +138,7 @@ export default function ModelViewport({ file, onReady, onError }) {
 
     return () => {
       cancelled = true
+      ctxRef.current = null
       cancelAnimationFrame(raf)
       resizeObserver?.disconnect()
       controls?.dispose()
@@ -113,6 +151,10 @@ export default function ModelViewport({ file, onReady, onError }) {
       host.innerHTML = ''
     }
   }, [file])
+
+  useEffect(() => {
+    applyOverlay(ctxRef.current, overlay)
+  }, [overlay])
 
   return <div ref={hostRef} className="preview-viewport" />
 }

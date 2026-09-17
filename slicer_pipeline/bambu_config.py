@@ -69,9 +69,14 @@ class BambuConfigEngine:
             "support_top_z_distance": "0.2",
             "brim_type": "auto_brim",
             "brim_width": "5",
+            "fuzzy_skin": "none",
+            "fuzzy_skin_point_distance": "0.3",
+            "fuzzy_skin_thickness": "0.2",
             "elefant_foot_compensation": "0.1",
             "bottom_surface_pattern": "monotonic",
+            "line_width": "0.42",
             "outer_wall_line_width": "0.42",
+            "initial_layer_line_width": "0.42",
             "outer_wall_speed": ["150"],
             "inner_wall_speed": ["200"],
             "sparse_infill_speed": ["200"],
@@ -97,6 +102,8 @@ class BambuConfigEngine:
         for r in triggered:
             LOGGER.info("Applying updates from rule '%s': %s", r.name, list(r.updates))
             for key, value in r.updates.items():
+                if key.startswith("_"):
+                    continue
                 self.profile[KEY_ALIASES.get(key, key)] = value
         layers = [
             r.updates.get("layer_height")
@@ -133,7 +140,18 @@ class BambuConfigEngine:
             "hole_diameters_mm": [round(d, 2) for d in metrics.hole_diameters_mm],
             "part_count": metrics.part_count,
             "color_count": metrics.color_count,
+            "hull_line_risk": bool(metrics.hull_line_risk),
+            "hull_line_shell_thickness_mm": round(metrics.hull_line_shell_thickness_mm, 3),
+            "fine_text_detected": bool(metrics.fine_text_detected),
+            "fine_stroke_width_mm": round(metrics.fine_stroke_width_mm, 3),
+            "is_miniature": bool(getattr(metrics, "is_miniature", False)),
+            "obb_extents_mm": [
+                round(float(x), 3) for x in getattr(metrics, "obb_extents_mm", metrics.extents_mm)
+            ],
             "triggered_rules": [r.name for r in results if r.triggered],
+            "hull_line_mitigation": any(r.name == "hull_line" and r.triggered for r in results),
+            "fine_detail_optimization": any(r.name == "fine_text" and r.triggered for r in results),
+            "miniature_optimization": any(r.name == "miniature" and r.triggered for r in results),
         }
 
     def merge_into_template(

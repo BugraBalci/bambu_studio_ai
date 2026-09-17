@@ -484,6 +484,54 @@
   font-weight: 400;
 }
 
+.rec-why em {
+  font-style: normal;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--text) 70%, var(--muted));
+}
+
+.rule-cards {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.eng-card {
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.7rem 0.8rem;
+}
+
+.eng-card .rec-why {
+  margin-top: 0.25rem;
+}
+
+.rule-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.35rem;
+}
+
+.rule-pill {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--accent);
+}
+
+.rule-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: 0.55rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
 .rationale {
   line-height: 1.55;
   color: color-mix(in srgb, var(--text) 88%, var(--muted));
