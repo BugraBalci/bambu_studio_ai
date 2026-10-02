@@ -45,6 +45,24 @@ const EMPTY_FILAMENT = {
 
 const MESH_EXTS = ['.glb', '.gltf', '.obj', '.stl', '.3mf']
 
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename || 'download'
+  a.rel = 'noopener'
+  document.body.appendChild(a)
+  a.click()
+  // Revoking the blob URL in the same turn cancels the download. A .3mf is
+  // large enough that the browser has not started reading it yet; a small JSON
+  // profile often still sneaks through. display:none also makes Firefox ignore
+  // the synthetic click, so the link stays in the document until then.
+  window.setTimeout(() => {
+    a.remove()
+    URL.revokeObjectURL(url)
+  }, 15000)
+}
+
 function isSupportedMesh(file) {
   const name = file?.name || ''
   const dot = name.lastIndexOf('.')
@@ -384,12 +402,7 @@ export default function App() {
       try {
         const profile = await exportProfile(recommendPayload)
         const blob = new Blob([JSON.stringify(profile, null, 2)], { type: 'application/json' })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `p2s_${geometry.file_id.slice(0, 8)}_profile.json`
-        a.click()
-        URL.revokeObjectURL(url)
+        downloadBlob(blob, `p2s_${geometry.file_id.slice(0, 8)}_profile.json`)
       } catch (e) {
         setError(e.message)
       } finally {
@@ -405,12 +418,10 @@ export default function App() {
       setError('')
       try {
         const { blob, filename } = await export3mf(recommendPayload)
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = filename
-        a.click()
-        URL.revokeObjectURL(url)
+        if (!blob || blob.size === 0) {
+          throw new Error('3MF dosyası boş döndü.')
+        }
+        downloadBlob(blob, filename.endsWith('.3mf') ? filename : `${filename}.3mf`)
       } catch (e) {
         setError(e.message)
       } finally {

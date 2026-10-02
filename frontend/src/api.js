@@ -56,7 +56,8 @@ export async function export3mf(payload) {
     }
     throw new Error(message)
   }
-  const blob = await res.blob()
+  const raw = await res.blob()
+  const blob = new Blob([raw], { type: 'application/octet-stream' })
   const cd = res.headers.get('Content-Disposition') || ''
   const match = cd.match(/filename="([^"]+)"/)
   return { blob, filename: match?.[1] || 'p2s_project.3mf' }
